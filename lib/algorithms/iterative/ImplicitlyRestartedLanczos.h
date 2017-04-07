@@ -719,25 +719,23 @@ until convergence
 #pragma omp parallel
        {
 	 typedef typename Field::vector_object vobj;
-	 std::vector < vobj > B(Nm);
+	 std::vector < vobj > B(Nconv);
 	 
 #pragma omp for
 	 for(int ss=0;ss < grid->oSites();ss++){
 	   
-	   for(int j=0; j<Nconv; ++j) B[Iconv[j]]=0.;
+	   for(int j=0; j<Nconv; ++j) B[j]=0.;
 	   for(int j=0; j<Nconv; ++j){
 	     for(int k=0; k<Nm ; ++k){
-	       B[Iconv[j]] +=Qt[k+Nm*Iconv[j]] * evec[k]._odata[ss]; 
+	       B[j] +=Qt[k+Nm*Iconv[j]] * evec[k]._odata[ss]; 
 	     }
 	   }
 	   for(int j=0; j<Nconv; ++j){
-	     evec[Iconv[j]]._odata[ss] = B[Iconv[j]];
+	     evec[j]._odata[ss] = B[j];
 	   }
 	 }
        }
 
-
-       // TODO: logic here clearly wrong... Iconv are not necessarily the first Nconv
       _sort.push(eval,evec,Nconv);
 
       std::cout<<GridLogMessage << "\n Converged\n Summary :\n";

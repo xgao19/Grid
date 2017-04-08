@@ -30,6 +30,8 @@ Author: Chulwoo Jung <chulwoo@bnl.gov>
 #ifndef GRID_IRL_H
 #define GRID_IRL_H
 
+#include <Grid/Eigen/Dense>
+
 #include <string.h> //memset
 #ifdef USE_LAPACK
 #ifdef USE_MKL
@@ -50,10 +52,103 @@ void LAPACK_dstegr(char *jobz, char *range, int *n, double *d, double *e,
 
 namespace Grid {
 
+template<class Field>
+class DiskCachedFieldVector {
+protected:
+  FILE* f;
+  int _Nm, _Nr;
+  std::vector<Field> _v;
+std::vector<int> _f;
+  char fn[1024];
+public:
+  typedef typename Field::vector_object vobj;
+
+DiskCachedFieldVector(int Nm,const Field& value,int Nr,char* root) : _Nr(Nr), _Nm(Nm), _v(Nr,value), _f(Nm,0) {
+    sprintf(fn,"%s.%5.5d",root,value._grid->ThisRank());
+    f = fopen(fn,"w+b");
+    assert(f);
+    // improvement? could unlink immediately so that no file can remain in case of crash...
+    std::cout << GridLogMessage << "Use " << root << " as swap file; Nm = " <<
+      Nm << " Nr = " << Nr << std::endl;
+
+    // for now dummy implementation
+    assert(Nr >= Nm);
+  }
+  
+  ~DiskCachedFieldVector() {
+    fclose(f);
+    //unlink(fn);
+    std::cout << GridLogMessage << "Close swap file" << std::endl;
+  }
+
+  Field& operator[](int i) {
+    //fprintf(f,"%d\n",i);
+_f[i] = 1;
+    return _v[i]; // todo
+  }
+  
+  /*
+    IDEA: SSD sequential and random write/read usually has similar performance once block-size is > 16MB
+
+    So if we swap in and out sufficiently large chunks, we should get good performance
+
+    usual [] needs entire vector to be swapped in, rotate needs all vectors for a small view;  in any case
+    handle this microscopically with these blocks
+
+    Rotate should have at most 1 full write;
+
+    ALSO: lock some eigenvectors and prevent them from being swapped, maybe most?  100 in-and-out could be enough
+  */
+  void rotate(DenseVector<RealD>& Qt,int j0, int j1, int k0,int k1) {
+
+    std::cout << GridLogMessage << "ROTATE(" << (j1-j0) << "," << (k1-k0) << ")" << std::endl;
+    {
+for (int l=0;l<_Nm;l++)
+    std::cout << GridLogMessage << " _f[" << l << "] = " << _f[l] << std::endl;
+}
+    GridBase* grid = _v[0]._grid;
+
+#pragma omp parallel
+    {
+      std::vector < vobj > B(_Nm);
+      
+#pragma omp for
+      for(int ss=0;ss < grid->oSites();ss++){
+	for(int j=j0; j<j1; ++j) B[j]=0.;
+
+	for(int j=j0; j<j1; ++j){
+	  for(int k=k0; k<k1; ++k){
+	    B[j] +=Qt[k+_Nm*j] * _v[k]._odata[ss];
+	  }
+	}
+	for(int j=j0; j<j1; ++j){
+	  _v[j]._odata[ss] = B[j];
+	}
+      }
+    }
+
+  }
+
+
+  size_t size() const {
+    return _Nm;
+  }
+
+  // release a full vector that was accessed by operator[]
+  void release(int i) {
+    //fprintf(f,"-%d\n",i);
+_f[i] = 0;
+  }
+
+  void sort(DenseVector<RealD>& sort_vals, int Nsort) {
+    // todo
+  }
+
+};
+
 /////////////////////////////////////////////////////////////
 // Implicitly restarted lanczos
 /////////////////////////////////////////////////////////////
-
 
 template<class Field> 
     class ImplicitlyRestartedLanczos {
@@ -127,7 +222,7 @@ public:
     /////////////////////////
     // Sanity checked this routine (step) against Saad.
     /////////////////////////
-    void RitzMatrix(DenseVector<Field>& evec,int k){
+    void RitzMatrix(DiskCachedFieldVector<Field>& evec,int k){
 
       if(1) return;
 
@@ -165,7 +260,7 @@ public:
  */
     void step(DenseVector<RealD>& lmd,
 	      DenseVector<RealD>& lme, 
-	      DenseVector<Field>& evec,
+	      DiskCachedFieldVector<Field>& evec,
 	      Field& w,int Nm,int k)
     {
       assert( k< Nm );
@@ -196,6 +291,11 @@ public:
       }
       
       if(k < Nm-1) evec[k+1] = w;
+
+      // release to swap if needed
+      evec.release(k);
+      evec.release(k-1);
+      evec.release(k+1);
     }
 
     void qr_decomp(DenseVector<RealD>& lmd,
@@ -449,7 +549,7 @@ public:
     }
 
     void orthogonalize(Field& w,
-		       DenseVector<Field>& evec,
+		       DiskCachedFieldVector<Field>& evec,
 		       int k)
     {
       double t0=-usecond()/1e6;
@@ -469,6 +569,7 @@ public:
       for(int j=0; j<k; ++j){
 	ip = innerProduct(evec[j],w); // are the evecs normalised? ; this assumes so.
 	w = w - ip * evec[j];
+	evec.release(j);
       }
       normalise(w);
       t0+=usecond()/1e6;
@@ -500,7 +601,7 @@ until convergence
 
 // alternate implementation for minimizing memory usage.  May affect the performance
     void calc(DenseVector<RealD>& eval,
-	      DenseVector<Field>& evec,
+	      DiskCachedFieldVector<Field>& evec,
 	      const Field& src,
 	      int& Nconv)
       {
@@ -611,27 +712,28 @@ until convergence
 	std::cout<<GridLogMessage <<"IRL::qr_decomp: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
 	assert(k2<Nm);
 
-	assert(k2<Nm);
-	assert(k1>0);
-#pragma omp parallel
-	{
-	  typedef typename Field::vector_object vobj;
-	  std::vector < vobj > B(Nm);
-	  
-#pragma omp for
-	  for(int ss=0;ss < grid->oSites();ss++){
-	    
-	    for(int j=0; j<Nm; ++j) B[j]=0.;
-	    for(int j=k1-1; j<(k2+1); ++j){
-	      for(int k=0; k<Nm ; ++k){
-		B[j] +=Qt[k+Nm*j] * evec[k]._odata[ss]; 
-	      }
+#if 0
+	if (grid->ThisRank() == 0){
+	  printf("Q:\n");
+	  for (int j=0;j<Nm; j++) {
+	    RealD n2 = 0.0;
+	    RealD n8 = 0.0;
+
+	    for(int k=0; k<Nm ; ++k){
+	      RealD a = ::fabs(Qt[k+Nm*j]);
+	      //printf("%5.5g ",a);
+	      n2 += ::pow(a,2.0);
+	      n8 += ::pow(a,8.0);
 	    }
-	    for(int j=k1-1; j<(k2+1); ++j){
-	      evec[j]._odata[ss] = B[j];
-	    }
+
+	    printf("%d = %g\n",j,::pow(n8,1.0/8.0) / ::pow(n2,1.0/2.0));
 	  }
 	}
+#endif
+
+	assert(k2<Nm);
+	assert(k1>0);
+	evec.rotate(Qt,k1-1,k2+1,0,Nm);
 
 	t1=usecond()/1e6;
 	std::cout<<GridLogMessage <<"IRL::QR rotation: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
@@ -648,6 +750,8 @@ until convergence
 	  evec[k2] = betar * f;
 	  lme[k2-1] = beta_k;
 
+	  evec.release(k2);
+
 	  // Convergence test
 	  for(int k=0; k<Nm; ++k){    
 	    eval2[k] = eval[k];
@@ -660,49 +764,73 @@ until convergence
 	  
 
 	Nconv = 0;
+
+
+	std::cout << GridLogMessage << "Rotation to test convergence; evec[0][0] = " << evec[0]._odata[0]()(0)(0).v[0] << std::endl;
+
+	evec.rotate(Qt,0,Nk,0,Nk);
+	
 	{
-
-		Field B(grid);
-		for(int j = 0; j<Nk; ++j){
-			B=0.;
-			B.checkerboard = evec[0].checkerboard;
-		    for(int k = 0; k<Nk; ++k){
-		    	B += Qt[k+j*Nm] * evec[k];
-		    }
-//		    _poly(_Linop,B,v);
-		    _Linop.HermOp(B,v);
-		    
-		    RealD vnum = real(innerProduct(B,v)); // HermOp.
-		    RealD vden = norm2(B);
-		    RealD vv0 = norm2(v);
-		    eval2[j] = vnum/vden;
-		    v -= eval2[j]*B;
-		    RealD vv = norm2(v);
+	  std::cout << GridLogMessage << "Test convergence" << std::endl;
+	  Field B(grid);
+	  
+	  for(int j = 0; j<Nk; ++j){
+	    B=evec[j];
+	    evec.release(j);
+	    B.checkerboard = evec[0].checkerboard;
+	    _Linop.HermOp(B,v);
 	    
-		    std::cout.precision(13);
-		    std::cout<<GridLogMessage << "[" << std::setw(3)<< std::setiosflags(std::ios_base::right) <<j<<"] "
-			     <<"eval = "<<std::setw(25)<< std::setiosflags(std::ios_base::left)<< eval2[j]
-			     <<"|H B[i] - eval[i]B[i]|^2 "<< std::setw(25)<< std::setiosflags(std::ios_base::right)<< vv
-			     <<" "<< vnum/(sqrt(vden)*sqrt(vv0))
-			     << " norm(B["<<j<<"])="<< vden <<std::endl;
+	    RealD vnum = real(innerProduct(B,v)); // HermOp.
+	    RealD vden = norm2(B);
+	    RealD vv0 = norm2(v);
+	    eval2[j] = vnum/vden;
+	    v -= eval2[j]*B;
+	    RealD vv = norm2(v);
 	    
-		    // change the criteria as evals are supposed to be sorted, all evals smaller(larger) than Nstop should have converged
-		    if((vv<eresid*eresid) && (j == Nconv) ){
-		      Iconv[Nconv] = j;
-		      ++Nconv;
-		    }
-		}
-	}
-
-	t1=usecond()/1e6;
-	std::cout<<GridLogMessage <<"IRL::convergence testing: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
-
-
+	    std::cout.precision(13);
+	    std::cout<<GridLogMessage << "[" << std::setw(3)<< std::setiosflags(std::ios_base::right) <<j<<"] "
+		     <<"eval = "<<std::setw(25)<< std::setiosflags(std::ios_base::left)<< eval2[j]
+		     <<"|H B[i] - eval[i]B[i]|^2 "<< std::setw(25)<< std::setiosflags(std::ios_base::right)<< vv
+		     <<" "<< vnum/(sqrt(vden)*sqrt(vv0))
+		     << " norm(B["<<j<<"])="<< vden <<std::endl;
+	    
+	    // change the criteria as evals are supposed to be sorted, all evals smaller(larger) than Nstop should have converged
+	    if((vv<eresid*eresid) && (j == Nconv) ){
+	      Iconv[Nconv] = j;
+	      ++Nconv;
+	    }
+	  }
+	  
+	  // test if we converged, if so, terminate
+	  t1=usecond()/1e6;
+	  std::cout<<GridLogMessage <<"IRL::convergence testing: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
+	  
 	  std::cout<<GridLogMessage<<" #modes converged: "<<Nconv<<std::endl;
 
 	  if( Nconv>=Nstop ){
 	    goto converged;
 	  }
+
+	  std::cout << GridLogMessage << "Rotate back" << std::endl;
+	  //B[j] +=Qt[k+_Nm*j] * _v[k]._odata[ss];
+	  {
+	    Eigen::MatrixXd qm = Eigen::MatrixXd::Zero(Nk,Nk);
+	    for (int k=0;k<Nk;k++)
+	      for (int j=0;j<Nk;j++)
+		qm(j,k) = Qt[k+Nm*j];
+	    GridStopWatch timeInv;
+	    timeInv.Start();
+	    Eigen::MatrixXd qmI = qm.inverse();
+	    timeInv.Stop();
+	    DenseVector<RealD> QtI(Nm*Nm);
+	    for (int k=0;k<Nk;k++)
+	      for (int j=0;j<Nk;j++)
+		QtI[k+Nm*j] = qmI(j,k);
+	    evec.rotate(QtI,0,Nk,0,Nk);
+	    
+	    std::cout << GridLogMessage << "Rotation done (" << timeInv.Elapsed() << "); evec[0][0] = " << evec[0]._odata[0]()(0)(0).v[0] << std::endl;
+	  }
+	}
 	} // end of iter loop
 	
 	std::cout<<GridLogMessage<<"\n NOT converged.\n";
@@ -714,34 +842,25 @@ until convergence
        eval.resize(Nconv);
 
        for(int i=0; i<Nconv; ++i)
-         eval[i] = eval2[Iconv[i]];
+         //eval[i] = eval2[Iconv[i]];
+	 eval[i] = eval2[i]; // for now just take the lowest Nconv, should be fine the way Lanc converges
 
-#pragma omp parallel
        {
-	 typedef typename Field::vector_object vobj;
-	 std::vector < vobj > B(Nconv);
 	 
-#pragma omp for
-	 for(int ss=0;ss < grid->oSites();ss++){
-	   
-	   for(int j=0; j<Nconv; ++j) B[j]=0.;
-	   for(int j=0; j<Nconv; ++j){
-	     for(int k=0; k<Nm ; ++k){
-	       B[j] +=Qt[k+Nm*Iconv[j]] * evec[k]._odata[ss]; 
-	     }
-	   }
-	   for(int j=0; j<Nconv; ++j){
-	     evec[j]._odata[ss] = B[j];
-	   }
+	 // test
+	 for (int j=0;j<Nconv;j++) {
+	   std::cout<<GridLogMessage << " |e[" << j << "]|^2 = " << norm2(evec[j]) << std::endl;
+	   evec.release(j);
 	 }
        }
 
-      _sort.push(eval,evec,Nconv);
-
-      std::cout<<GridLogMessage << "\n Converged\n Summary :\n";
-      std::cout<<GridLogMessage << " -- Iterations  = "<< Nconv  << "\n";
-      std::cout<<GridLogMessage << " -- beta(k)     = "<< beta_k << "\n";
-      std::cout<<GridLogMessage << " -- Nconv       = "<< Nconv  << "\n";
+       //_sort.push(eval,evec,Nconv);
+       evec.sort(eval,Nconv);
+       
+       std::cout<<GridLogMessage << "\n Converged\n Summary :\n";
+       std::cout<<GridLogMessage << " -- Iterations  = "<< Nconv  << "\n";
+       std::cout<<GridLogMessage << " -- beta(k)     = "<< beta_k << "\n";
+       std::cout<<GridLogMessage << " -- Nconv       = "<< Nconv  << "\n";
      }
 
     /////////////////////////////////////////////////

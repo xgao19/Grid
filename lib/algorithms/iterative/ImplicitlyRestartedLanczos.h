@@ -766,13 +766,15 @@ until convergence
 	Nconv = 0;
 
 
-	std::cout << GridLogMessage << "Rotation to test convergence; evec[0][0] = " << evec[0]._odata[0]()(0)(0).v[0] << std::endl;
+	std::cout << GridLogMessage << "Rotation to test convergence " << std::endl;
 
 	evec.rotate(Qt,0,Nk,0,Nk);
 	
 	{
 	  std::cout << GridLogMessage << "Test convergence" << std::endl;
 	  Field B(grid);
+	  Field ev0_orig(grid);
+	  ev0_orig = evec[0];
 	  
 	  for(int j = 0; j<Nk; ++j){
 	    B=evec[j];
@@ -826,9 +828,13 @@ until convergence
 	    for (int k=0;k<Nk;k++)
 	      for (int j=0;j<Nk;j++)
 		QtI[k+Nm*j] = qmI(j,k);
+
+	    RealD res_check_rotate_inverse = (qm*qmI - Eigen::MatrixXd::Identity(Nk,Nk)).norm(); // sqrt( |X|^2 )
+	    assert(res_check_rotate_inverse < 1e-7);
 	    evec.rotate(QtI,0,Nk,0,Nk);
 	    
-	    std::cout << GridLogMessage << "Rotation done (" << timeInv.Elapsed() << "); evec[0][0] = " << evec[0]._odata[0]()(0)(0).v[0] << std::endl;
+	    std::cout << GridLogMessage << "Rotation done (in " << timeInv.Elapsed() << ", error = " << res_check_rotate_inverse << 
+	      "); | evec[0] - evec[0]_orig | = " << ::sqrt(norm2(evec[0] - ev0_orig)) << std::endl;
 	  }
 	}
 	} // end of iter loop

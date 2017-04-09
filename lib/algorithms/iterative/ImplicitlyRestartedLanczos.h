@@ -218,29 +218,32 @@ public:
     std::cout << GridLogMessage << "ROTATE(" << (j1-j0) << "," << (k1-k0) << ")" << std::endl;
     GridBase* grid = _v[0]._grid;
 
-    // TODO: implement rotation for Nr < Nm
-    // Idea: write all cached back to disk and then implement a simple procedure for rotation below
-    flush_cached_to_disk();
+    if (_Nr < _Nm) {
+      // TODO: implement rotation for Nr < Nm
+      // Idea: write all cached back to disk and then implement a simple procedure for rotation below
+      flush_cached_to_disk();
+    } else {
 
 #pragma omp parallel
-    {
-      std::vector < vobj > B(_Nm);
-      
+      {
+	std::vector < vobj > B(_Nm);
+	
 #pragma omp for
-      for(int ss=0;ss < grid->oSites();ss++){
-	for(int j=j0; j<j1; ++j) B[j]=0.;
-
-	for(int j=j0; j<j1; ++j){
-	  for(int k=k0; k<k1; ++k){
-	    B[j] +=Qt[k+_Nm*j] * _v[k]._odata[ss];
+	for(int ss=0;ss < grid->oSites();ss++){
+	  for(int j=j0; j<j1; ++j) B[j]=0.;
+	  
+	  for(int j=j0; j<j1; ++j){
+	    for(int k=k0; k<k1; ++k){
+	      B[j] +=Qt[k+_Nm*j] * _v[k]._odata[ss];
+	    }
+	  }
+	  for(int j=j0; j<j1; ++j){
+	    _v[j]._odata[ss] = B[j];
 	  }
 	}
-	for(int j=j0; j<j1; ++j){
-	  _v[j]._odata[ss] = B[j];
-	}
       }
-    }
 
+    }
   }
 
   size_t size() const {

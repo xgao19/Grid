@@ -184,7 +184,7 @@ public:
     while (try_to_make_slot_available());
     // if _locked_slot is not empty, abort
     for (auto _s = _locked_slot.cbegin(); _s != _locked_slot.cend(); _s++) {
-      std::cout << GridLogMessage << "Error: vector " << find_cached_for_slot(i) << " in slot " << *s << " is still locked" << std::endl;
+      std::cout << GridLogMessage << "Error: vector " << find_cached_for_slot(*_s) << " in slot " << *_s << " is still locked" << std::endl;
     }
     assert(_locked_slot.empty());
   }

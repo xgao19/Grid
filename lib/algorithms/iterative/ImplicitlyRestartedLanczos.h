@@ -9,6 +9,7 @@
 Author: Peter Boyle <paboyle@ph.ed.ac.uk>
 Author: paboyle <paboyle@ph.ed.ac.uk>
 Author: Chulwoo Jung <chulwoo@bnl.gov>
+Author: Christoph Lehner <clehner@bnl.gov>
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -31,6 +32,8 @@ Author: Chulwoo Jung <chulwoo@bnl.gov>
 #define GRID_IRL_H
 
 #include <Grid/Eigen/Dense>
+#include <set>
+#include <list>
 
 #include <string.h> //memset
 #ifdef USE_LAPACK
@@ -56,35 +59,146 @@ template<class Field>
 class DiskCachedFieldVector {
 protected:
   FILE* f;
-  int _Nm, _Nr;
-  std::vector<Field> _v;
-std::vector<int> _f;
+  int _Nm,  // number of vectors in RAM plus DISK
+    _Nr,    // number of total vectors in RAM
+    _Nlock; // lock first Nlock vectors to RAM
+  std::vector<Field> _v; // vectors in RAM
+  std::map<int,int> _cached; 
+  std::vector<int> _available;
+  std::set<int> _locked_slot;
+  std::list<int> _slot_history;
   char fn[1024];
+
+  const int N_SWAPPABLE_EVECS = 10;
+
 public:
   typedef typename Field::vector_object vobj;
 
-DiskCachedFieldVector(int Nm,const Field& value,int Nr,char* root) : _Nr(Nr), _Nm(Nm), _v(Nr,value), _f(Nm,0) {
-    sprintf(fn,"%s.%5.5d",root,value._grid->ThisRank());
-    f = fopen(fn,"w+b");
-    assert(f);
-    // improvement? could unlink immediately so that no file can remain in case of crash...
-    std::cout << GridLogMessage << "Use " << root << " as swap file; Nm = " <<
-      Nm << " Nr = " << Nr << std::endl;
+ DiskCachedFieldVector(int Nm,const Field& value,int Nr,char* root) : _Nr(Nr), _Nm(Nm), _v(Nr,value) {
 
-    // for now dummy implementation
-    assert(Nr >= Nm);
+    // silly to allocate more memory than needed
+    assert(Nr <= Nm);
+
+    // lock almost all to RAM
+    if (Nr < Nm) {
+
+      _Nlock = Nr - N_SWAPPABLE_EVECS;
+      if (_Nlock < 0)
+	_Nlock = 0;
+
+      for (int i = _Nlock; i < _Nr; i++)
+	_available.push_back(i); // add i as an available slot to load cached vectors
+
+      // need a swap file
+      sprintf(fn,"%s.%5.5d",root,value._grid->ThisRank());
+      f = fopen(fn,"w+b");
+      assert(f);
+
+      // improvement? could unlink immediately so that no file can remain in case of crash...
+      std::cout << GridLogMessage << "Use " << root << " as swap file; Nm = " <<
+	Nm << " Nr = " << Nr << std::endl;
+
+    } else {
+      _Nlock = Nm;
+      f = 0;
+
+      // improvement? could unlink immediately so that no file can remain in case of crash...
+      std::cout << GridLogMessage << "Nm = " << Nm << "; all vectors in RAM" << std::endl;
+      
+    }
+      
   }
   
   ~DiskCachedFieldVector() {
-    fclose(f);
-    //unlink(fn);
-    std::cout << GridLogMessage << "Close swap file" << std::endl;
+    if (f) {
+      fclose(f);
+      //unlink(fn);
+      std::cout << GridLogMessage << "Close swap file" << std::endl;
+    }
   }
 
   Field& operator[](int i) {
-    //fprintf(f,"%d\n",i);
-_f[i] = 1;
-    return _v[i]; // todo
+    if (i < _Nlock) {
+      return _v[i];
+    } else {
+      // if vector is currently cached, return cached vector
+      auto _c = _cached.find(i);
+      if (_c != _cached.end())
+	return _v[_c->second];
+
+      // if not, find empty cache slot and read full vector from disk to slot
+      if (_available.empty()) {
+	// no slot available, try to make one available by writing released slots back to disk
+	try_make_slot_available();
+	// if still no slot is available, give up
+	assert(!_available.empty());
+      }
+
+      int av = _available.back(); _available.pop_back();
+      
+      read_vector_from_disk(i,av);
+
+      // update cached vector info, slot mapping
+      _cached[i] = av;
+      _locked_slot.insert(av);
+      _slot_history.push_back(av);
+
+      return _v[av];
+    }
+  }
+
+  int find_cached_for_slot(int av) {
+
+    for (auto _s = _cached.cbegin(); _s != _cached.cend(); _s++)
+      if (_s->second == av)
+	return _s->first;
+
+    return -1;
+  }
+
+  bool try_make_slot_available() {
+    // go through _slot_history from oldest (first) to newest (last)
+    // and look for a slot that is not locked
+    for (auto _s = _slot_history.cbegin(); _s != _slot_history.cend(); _s++) {
+      if (_locked_slot.find(*_s) == _locked_slot.end()) {
+
+	// if found, remove it from _slot_history,
+	// add it to available, remove it from _cached,
+	// and write it back to disk
+	_slot_history.remove(*_s);
+
+	int i = find_cached_for_slot(*_s);
+	assert(i != -1);
+	write_vector_to_disk(i,*_s);
+	_cached.erase(i);
+	_available.push_back(*_s);
+
+	return true;
+      }
+    }
+
+    return false;
+  }
+
+  void flush_cached_to_disk() {
+    while (try_to_make_slot_available());
+    // if _locked_slot is not empty, abort
+    for (auto _s = _locked_slot.cbegin(); _s != _locked_slot.cend(); _s++) {
+      std::cout << GridLogMessage << "Error: vector " << find_cached_for_slot(i) << " in slot " << *s << " is still locked" << std::endl;
+    }
+    assert(_locked_slot.empty());
+  }
+
+  void write_vector_to_disk(int i, int av) {
+    // first find out which vctor it is from _cached
+    // TODO
+    std::cout << GridLogMessage << "Cache::write_slot_to_disk(" << i << ")" << std::endl;
+  }
+
+  void read_vector_from_disk(int i, int av) {
+    // read vector i to memory slot av
+    // TODO
+    std::cout << GridLogMessage << "Cache::read_vector_from_disk(" << i << ")" << std::endl;
   }
   
   /*
@@ -102,11 +216,11 @@ _f[i] = 1;
   void rotate(DenseVector<RealD>& Qt,int j0, int j1, int k0,int k1) {
 
     std::cout << GridLogMessage << "ROTATE(" << (j1-j0) << "," << (k1-k0) << ")" << std::endl;
-    {
-for (int l=0;l<_Nm;l++)
-    std::cout << GridLogMessage << " _f[" << l << "] = " << _f[l] << std::endl;
-}
     GridBase* grid = _v[0]._grid;
+
+    // TODO: implement rotation for Nr < Nm
+    // Idea: write all cached back to disk and then implement a simple procedure for rotation below
+    flush_cached_to_disk();
 
 #pragma omp parallel
     {
@@ -129,19 +243,24 @@ for (int l=0;l<_Nm;l++)
 
   }
 
-
   size_t size() const {
     return _Nm;
   }
 
   // release a full vector that was accessed by operator[]
   void release(int i) {
-    //fprintf(f,"-%d\n",i);
-_f[i] = 0;
+    if (i >= _Nlock) {
+      auto _c = _cached.find(i);
+      if (_c != _cached.end()) {
+	// just remove lock in this vector, will be swapped back
+	// to disk if needed in operator[]
+	_locked_slot.erase(_c->second);
+      }
+    }
   }
 
   void sort(DenseVector<RealD>& sort_vals, int Nsort) {
-    // todo
+    // TODO
   }
 
 };
@@ -768,73 +887,78 @@ until convergence
 
 	std::cout << GridLogMessage << "Rotation to test convergence " << std::endl;
 
-	evec.rotate(Qt,0,Nk,0,Nk);
-	
 	{
-	  std::cout << GridLogMessage << "Test convergence" << std::endl;
-	  Field B(grid);
 	  Field ev0_orig(grid);
 	  ev0_orig = evec[0];
 	  
-	  for(int j = 0; j<Nk; ++j){
-	    B=evec[j];
-	    evec.release(j);
-	    B.checkerboard = evec[0].checkerboard;
-	    _Linop.HermOp(B,v);
-	    
-	    RealD vnum = real(innerProduct(B,v)); // HermOp.
-	    RealD vden = norm2(B);
-	    RealD vv0 = norm2(v);
-	    eval2[j] = vnum/vden;
-	    v -= eval2[j]*B;
-	    RealD vv = norm2(v);
-	    
-	    std::cout.precision(13);
-	    std::cout<<GridLogMessage << "[" << std::setw(3)<< std::setiosflags(std::ios_base::right) <<j<<"] "
-		     <<"eval = "<<std::setw(25)<< std::setiosflags(std::ios_base::left)<< eval2[j]
-		     <<"|H B[i] - eval[i]B[i]|^2 "<< std::setw(25)<< std::setiosflags(std::ios_base::right)<< vv
-		     <<" "<< vnum/(sqrt(vden)*sqrt(vv0))
-		     << " norm(B["<<j<<"])="<< vden <<std::endl;
-	    
-	    // change the criteria as evals are supposed to be sorted, all evals smaller(larger) than Nstop should have converged
-	    if((vv<eresid*eresid) && (j == Nconv) ){
-	      Iconv[Nconv] = j;
-	      ++Nconv;
-	    }
-	  }
+	  evec.rotate(Qt,0,Nk,0,Nk);
 	  
-	  // test if we converged, if so, terminate
-	  t1=usecond()/1e6;
-	  std::cout<<GridLogMessage <<"IRL::convergence testing: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
-	  
-	  std::cout<<GridLogMessage<<" #modes converged: "<<Nconv<<std::endl;
-
-	  if( Nconv>=Nstop ){
-	    goto converged;
-	  }
-
-	  std::cout << GridLogMessage << "Rotate back" << std::endl;
-	  //B[j] +=Qt[k+_Nm*j] * _v[k]._odata[ss];
 	  {
-	    Eigen::MatrixXd qm = Eigen::MatrixXd::Zero(Nk,Nk);
-	    for (int k=0;k<Nk;k++)
-	      for (int j=0;j<Nk;j++)
-		qm(j,k) = Qt[k+Nm*j];
-	    GridStopWatch timeInv;
-	    timeInv.Start();
-	    Eigen::MatrixXd qmI = qm.inverse();
-	    timeInv.Stop();
-	    DenseVector<RealD> QtI(Nm*Nm);
-	    for (int k=0;k<Nk;k++)
-	      for (int j=0;j<Nk;j++)
-		QtI[k+Nm*j] = qmI(j,k);
-
-	    RealD res_check_rotate_inverse = (qm*qmI - Eigen::MatrixXd::Identity(Nk,Nk)).norm(); // sqrt( |X|^2 )
-	    assert(res_check_rotate_inverse < 1e-7);
-	    evec.rotate(QtI,0,Nk,0,Nk);
+	    std::cout << GridLogMessage << "Test convergence" << std::endl;
+	    Field B(grid);
 	    
-	    std::cout << GridLogMessage << "Rotation done (in " << timeInv.Elapsed() << ", error = " << res_check_rotate_inverse << 
-	      "); | evec[0] - evec[0]_orig | = " << ::sqrt(norm2(evec[0] - ev0_orig)) << std::endl;
+	    for(int j = 0; j<Nk; ++j){
+	      B=evec[j];
+	      evec.release(j);
+	      B.checkerboard = evec[0].checkerboard;
+	      _Linop.HermOp(B,v);
+	      
+	      RealD vnum = real(innerProduct(B,v)); // HermOp.
+	      RealD vden = norm2(B);
+	      RealD vv0 = norm2(v);
+	      eval2[j] = vnum/vden;
+	      v -= eval2[j]*B;
+	      RealD vv = norm2(v);
+	      
+	      std::cout.precision(13);
+	      std::cout<<GridLogMessage << "[" << std::setw(3)<< std::setiosflags(std::ios_base::right) <<j<<"] "
+		       <<"eval = "<<std::setw(25)<< std::setiosflags(std::ios_base::left)<< eval2[j]
+		       <<"|H B[i] - eval[i]B[i]|^2 "<< std::setw(25)<< std::setiosflags(std::ios_base::right)<< vv
+		       <<" "<< vnum/(sqrt(vden)*sqrt(vv0))
+		       << " norm(B["<<j<<"])="<< vden <<std::endl;
+	      
+	      // change the criteria as evals are supposed to be sorted, all evals smaller(larger) than Nstop should have converged
+	      if((vv<eresid*eresid) && (j == Nconv) ){
+		Iconv[Nconv] = j;
+		++Nconv;
+	      }
+	    }
+	    
+	    // test if we converged, if so, terminate
+	    t1=usecond()/1e6;
+	    std::cout<<GridLogMessage <<"IRL::convergence testing: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
+	    
+	    std::cout<<GridLogMessage<<" #modes converged: "<<Nconv<<std::endl;
+	    
+	    if( Nconv>=Nstop ){
+	      goto converged;
+	    }
+	    
+	    std::cout << GridLogMessage << "Rotate back" << std::endl;
+	    //B[j] +=Qt[k+_Nm*j] * _v[k]._odata[ss];
+	    {
+	      Eigen::MatrixXd qm = Eigen::MatrixXd::Zero(Nk,Nk);
+	      for (int k=0;k<Nk;k++)
+		for (int j=0;j<Nk;j++)
+		  qm(j,k) = Qt[k+Nm*j];
+	      GridStopWatch timeInv;
+	      timeInv.Start();
+	      Eigen::MatrixXd qmI = qm.inverse();
+	      timeInv.Stop();
+	      DenseVector<RealD> QtI(Nm*Nm);
+	      for (int k=0;k<Nk;k++)
+		for (int j=0;j<Nk;j++)
+		  QtI[k+Nm*j] = qmI(j,k);
+	      
+	      RealD res_check_rotate_inverse = (qm*qmI - Eigen::MatrixXd::Identity(Nk,Nk)).norm(); // sqrt( |X|^2 )
+	      assert(res_check_rotate_inverse < 1e-7);
+	      evec.rotate(QtI,0,Nk,0,Nk);
+	      
+	      axpy(ev0_orig,-1.0,evec[0],ev0_orig);
+	      std::cout << GridLogMessage << "Rotation done (in " << timeInv.Elapsed() << " = " << timeInv.useconds() << " us" <<
+		", error = " << res_check_rotate_inverse << 
+		"); | evec[0] - evec[0]_orig | = " << ::sqrt(norm2(ev0_orig)) << std::endl;
+	    }
 	  }
 	}
 	} // end of iter loop

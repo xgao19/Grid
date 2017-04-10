@@ -55,178 +55,157 @@ void LAPACK_dstegr(char *jobz, char *range, int *n, double *d, double *e,
 
 namespace Grid {
 
-template<class Field>
-class DiskCachedFieldVector {
-protected:
-  FILE* f;
-  int _Nm,  // number of vectors in RAM plus DISK
-    _Nr,    // number of total vectors in RAM
-    _Nlock; // lock first Nlock vectors to RAM
-  std::vector<Field> _v; // vectors in RAM
-  std::map<int,int> _cached; 
-  std::vector<int> _available;
-  std::set<int> _locked_slot;
-  std::list<int> _slot_history;
-  char fn[1024];
-
-  const int N_SWAPPABLE_EVECS = 10;
-
+  template<Coeff_t,Field>
+class BlockedGrid {
 public:
+  GridBase* _grid;
+  
+  std::vector<int> _bs; // block size
+  std::vector<int> _nb; // number of blocks
+  std::vector<int> _l;  // local dimensions irrespective of eo
+  int _nd, _blocks, _f_size, _f_block_size;
+  
+  BlockedGrid(GridBase* grid, const std::vector<int>& block_size) :
+    _grid(grid), _bs(block_size), _nd((int)_bs.size()), 
+    _nb(block_size), _l(block_size) {
+
+    _blocks = 1;
+    _l = grid->FullDimensions();
+    _f_size = 1;
+
+    for (int i=0;i<_nd;i++) {
+      _l[i] /= grid->_processors[i];
+      assert(!(_l[i] % _bs[i]));
+      _nb[i] = _l[i] / _bs[i];
+      _blocks *= _nb[i];
+      _f_size *= _l[i];
+    }
+
+    _f_size *= 24 / 2;
+    _f_block_size = _f_size / _blocks;
+
+    std::cout << GridLogMessage << "BlockedGrid:\n" << std::endl;
+    std::cout << GridLogMessage << " _l     = " << _l << std::endl;
+    std::cout << GridLogMessage << " _bs    = " << _bs << std::endl;
+    std::cout << GridLogMessage << " _nb    = " << _nb << std::endl;
+    std::cout << GridLogMessage << " _blocks = " << _blocks << std::endl;
+    std::cout << GridLogMessage << " sizeof(Coeff_t) = " << sizeof(Coeff_t) << std::endl;
+    std::cout << GridLogMessage << " _f_size = " << _f_size << std::endl;
+    std::cout << GridLogMessage << " _f_block_size = " << _f_block_size << std::endl;
+  }
+
+    std::complex<Coeff_t> block_sp(int b, const Field& x, const Field& y) {
+      return 0.0;
+    }
+
+    void block_caxpy(int b, Field& ret, const std::complex<Coeff_t>& a, const Field& x, const Field& y) {
+    }
+
+    void block_cscale(int b, const std::complex<Coeff_t>& a, Field& ret) {
+    }
+
+};
+  
+template<class Field>
+class BlockedFieldVector {
+protected:
+  int _Nm,  // number of total vectors
+    _Nfull; // number of vectors kept in full precision
+
+  typedef typename Field::scalar_type Coeff_t;
   typedef typename Field::vector_object vobj;
 
-  // TODO: memory access problem?  add read-only access (such don't need to be written back to disk)
-  DiskCachedFieldVector(int Nm,const Field& value,int Nr,char* root) : _Nr(Nr), _Nm(Nm), _v(Nr,value) {
+  BlockedGrid<Coeff_t,Field> _bgrid;
+  
+  std::vector<Field> _v; // _Nfull vectors
+  std::vector< std::complex<Coeff_t> > _c;
 
-    // silly to allocate more memory than needed
-    assert(Nr <= Nm);
+  bool _full_locked;
+  
+public:
 
-    // lock almost all to RAM
-    if (Nr < Nm) {
+  BlockedFieldVector(int Nm,GridBase* value,int Nfull,const std::vector<int>& block_size) : 
+  _Nfull(Nfull), _Nm(Nm), _v(_Nm,value), _bgrid(value,block_size), _full_locked(false) {
 
-      _Nlock = Nr - N_SWAPPABLE_EVECS;
-      if (_Nlock < 0)
-	_Nlock = 0;
+    _c.resize(_Nm*_Nfull*_bgrid._blocks);
+#pragma omp parallel for
+    for (int64_t i=0;i<_c.size();i++)
+      _c[i] = 0.0;
 
-      for (int i = _Nlock; i < _Nr; i++)
-	_available.push_back(i); // add i as an available slot to load cached vectors
-
-      // need a swap file
-      sprintf(fn,"%s.%5.5d",root,value._grid->ThisRank());
-      f = fopen(fn,"w+b");
-      assert(f);
-
-      // improvement? could unlink immediately so that no file can remain in case of crash...
-      std::cout << GridLogMessage << "Use " << root << " as swap file; Nm = " <<
-	Nm << " Nr = " << Nr << std::endl;
-
-    } else {
-      _Nlock = Nm;
-      f = 0;
-
-      // improvement? could unlink immediately so that no file can remain in case of crash...
-      std::cout << GridLogMessage << "Nm = " << Nm << "; all vectors in RAM" << std::endl;
-      
-    }
-      
+    std::cout << GridLogMessage << "BlockedFieldVector initialized:\n";
+    std::cout << GridLogMessage << " Nm = " << Nm << "\n";
+    std::cout << GridLogMessage << " Nfull = " << Nfull << "\n";
+    std::cout << GridLogMessage << " Size of coefficients = " << 
+      ((double)_c.size()*sizeof(Coeff_t) / 1024./1024./1024.) << " GB\n";
   }
   
-  ~DiskCachedFieldVector() {
-    if (f) {
-      fclose(f);
-      //unlink(fn);
-      std::cout << GridLogMessage << "Close swap file" << std::endl;
+  ~BlockedFieldVector() {
+  
+  }
+
+#define cidx(i,b,j) ((int64_t)b + (int64_t)_bgrid._blocks * (int64_t)(j + _Nfull*i))
+  void set_coef(int i, int b, int j, const std::complex<Coeff_t>& v) {
+    _c[ cidx(i,b,j) ] = v;
+  }
+
+  void lock_in_first_vectors() {
+    // orthogonalize local blocks and create coefficients for first Nfull vectors
+#pragma omp parallel
+    for (int b=0;b<_bgrid._blocks;b++) {
+      for (int i=0;i<_Nfull;i++) {
+	// |i> -= <j|i> |j>
+	for (int j=0;j<i;j++) {
+	  std::complex<Coeff_t> v = _bgrid.block_sp(b,_v[j],_v[i]);
+	  set_coef(i,b,j,v);
+	  _bgrid.block_caxpy(b,_v[i],-v,_v[j],_v[i]);
+	}
+
+	std::complex<RealD> nrm = _bgrid.block_sp(b,_v[i],_v[i]);
+	set_coef(i,b,i,sqrt(nrm));
+	
+	_bgrid.block_cscale(b,1.0 / sqrt(nrm),_v[i]);
+      }
     }
   }
 
-  Field& operator[](int i) {
-    if (i < _Nlock) {
+  Field get_blocked(int i) {
+    printf("get_blocked not yet implemented\n");
+    abort();
+    return _v[0];
+  }
+
+  void put_blocked(int i, const Field& v) {
+    printf("put_blocked not yet implemented\n");
+  }
+
+  Field get(int i) {
+    if (!_full_locked) {
+      assert(i < _Nfull);
       return _v[i];
     } else {
-
-      // if vector is currently cached, return cached vector
-      auto _c = _cached.find(i);
-      if (_c != _cached.end())
-	return _v[_c->second];
-
-      // if not, find empty cache slot and read full vector from disk to slot
-      if (_available.empty()) {
-	// no slot available, try to make one available by writing released slots back to disk
-	try_make_slot_available();
-	// if still no slot is available, give up
-	assert(!_available.empty());
-      }
-
-      int av = _available.back(); _available.pop_back();
-      
-      read_vector_from_disk(i,av);
-
-      // update cached vector info, slot mapping
-      _cached[i] = av;
-      _locked_slot.insert(av);
-      _slot_history.push_back(av);
-      
-      _v[0]._grid->Barrier();
-      std::cout << GridLogMessage << "operator[" << i << "] = _v[" << av << "/" << _v.size() << "]" << std::endl;
-      return _v[av];
+      return get_blocked(i);
     }
   }
 
-  int find_cached_for_slot(int av) {
+  void put(int i, const Field& v) {
+    std::cout << GridLogMessage << "::put(" << i << ")\n";
 
-    for (auto _s = _cached.cbegin(); _s != _cached.cend(); _s++)
-      if (_s->second == av)
-	return _s->first;
-
-    return -1;
-  }
-
-  bool try_make_slot_available() {
-    // go through _slot_history from oldest (first) to newest (last)
-    // and look for a slot that is not locked
-    for (auto _s = _slot_history.cbegin(); _s != _slot_history.cend(); _s++) {
-      if (_locked_slot.find(*_s) == _locked_slot.end()) {
-
-	// if found, remove it from _slot_history,
-	// add it to available, remove it from _cached,
-	// and write it back to disk
-	_slot_history.remove(*_s);
-
-	int i = find_cached_for_slot(*_s);
-	assert(i != -1);
-	write_vector_to_disk(i,*_s);
-	_cached.erase(i);
-	_available.push_back(*_s);
-
-	return true;
-      }
+    if (!_full_locked && i >= _Nfull) {
+      // lock in smallest vectors so we can build on them
+      _full_locked = true;
+      lock_in_first_vectors();
     }
 
-    return false;
-  }
-
-  void flush_cached_to_disk() {
-    while (try_make_slot_available());
-    // if _locked_slot is not empty, abort
-    for (auto _s = _locked_slot.cbegin(); _s != _locked_slot.cend(); _s++) {
-      std::cout << GridLogMessage << "Error: vector " << find_cached_for_slot(*_s) << " in slot " << *_s << " is still locked" << std::endl;
-    }
-    assert(_locked_slot.empty());
-  }
-
-  void write_vector_to_disk(int i, int av) {
-    // first find out which vctor it is from _cached
-    // TODO
-    std::cout << GridLogMessage << "Cache::write_slot_to_disk(" << i << ", " << av << ")" << std::endl;
-  }
-
-  void read_vector_from_disk(int i, int av) {
-    // read vector i to memory slot av
-    // TODO
-    std::cout << GridLogMessage << "Cache::read_vector_from_disk(" << i << ", " << av << ")" << std::endl;
-  }
-  
-  /*
-    IDEA: SSD sequential and random write/read usually has similar performance once block-size is > 16MB
-
-    So if we swap in and out sufficiently large chunks, we should get good performance
-
-    usual [] needs entire vector to be swapped in, rotate needs all vectors for a small view;  in any case
-    handle this microscopically with these blocks
-
-    Rotate should have at most 1 full write;
-
-    ALSO: lock some eigenvectors and prevent them from being swapped, maybe most?  100 in-and-out could be enough
-  */
-  void rotate(DenseVector<RealD>& Qt,int j0, int j1, int k0,int k1) {
-
-    std::cout << GridLogMessage << "ROTATE(" << (j1-j0) << "," << (k1-k0) << ")" << std::endl;
-    GridBase* grid = _v[0]._grid;
-
-    if (_Nr < _Nm) {
-      // TODO: implement rotation for Nr < Nm
-      // Idea: write all cached back to disk and then implement a simple procedure for rotation below
-      flush_cached_to_disk();
+    if (!_full_locked) {
+      assert(i < _Nfull);
+      _v[i] = v;
     } else {
+      put_blocked(i,v);
+    }
+  }
+
+  void rotate(DenseVector<RealD>& Qt,int j0, int j1, int k0,int k1) {
+    GridBase* grid = _v[0]._grid;
 
 #pragma omp parallel
       {
@@ -247,29 +226,10 @@ public:
 	}
       }
 
-    }
   }
 
   size_t size() const {
     return _Nm;
-  }
-
-  // release a full vector that was accessed by operator[]
-  void release(int i) {
-    if (i >= _Nlock) {
-      auto _c = _cached.find(i);
-      if (_c != _cached.end()) {
-	// just remove lock in this vector, will be swapped back
-	// to disk if needed in operator[]
-	_locked_slot.erase(_c->second);
-
-#if 0
-	std::cout << GridLogMessage << "Currently locked:" << std::endl;
-	for (auto a = _locked_slot.cbegin(); a!=_locked_slot.cend();a++)
-	  std::cout << GridLogMessage << " -  " << *a << std::endl;
-#endif
-      }
-    }
   }
 
   void sort(DenseVector<RealD>& sort_vals, int Nsort) {
@@ -354,8 +314,9 @@ public:
     /////////////////////////
     // Sanity checked this routine (step) against Saad.
     /////////////////////////
-    void RitzMatrix(DiskCachedFieldVector<Field>& evec,int k){
+    void RitzMatrix(BlockedFieldVector<Field>& evec,int k){
 
+#if 0
       if(1) return;
 
       GridBase *grid = evec[0]._grid;
@@ -378,6 +339,7 @@ public:
 	}
 	std::cout<<GridLogMessage << std::endl;
       }
+#endif
     }
 
 /* Saad PP. 195
@@ -392,26 +354,27 @@ public:
  */
     void step(DenseVector<RealD>& lmd,
 	      DenseVector<RealD>& lme, 
-	      DiskCachedFieldVector<Field>& evec,
+	      BlockedFieldVector<Field>& evec,
 	      Field& w,int Nm,int k)
     {
       assert( k< Nm );
 
-    
-      _poly(_Linop,evec[k],w);      // 3. wk:=Avk−βkv_{k−1}
+      Field evec_k = evec.get(k);
+
+      _poly(_Linop,evec_k,w);      // 3. wk:=Avk−βkv_{k−1}
       if(k>0){
-	w -= lme[k-1] * evec[k-1];
+	w -= lme[k-1] * evec.get(k-1);
       }    
 
-      ComplexD zalph = innerProduct(evec[k],w); // 4. αk:=(wk,vk)
+      ComplexD zalph = innerProduct(evec_k,w); // 4. αk:=(wk,vk)
       RealD     alph = real(zalph);
 
-      w = w - alph * evec[k];// 5. wk:=wk−αkvk
+      w = w - alph * evec_k;// 5. wk:=wk−αkvk
 
       RealD beta = normalise(w); // 6. βk+1 := ∥wk∥2. If βk+1 = 0 then Stop
                                  // 7. vk+1 := wk/βk+1
 
-	std::cout<<GridLogMessage << "alpha = " << zalph << " beta "<<beta<<std::endl;
+      std::cout<<GridLogMessage << "alpha = " << zalph << " beta "<<beta<<std::endl;
       const RealD tiny = 1.0e-20;
       if ( beta < tiny ) { 
 	std::cout<<GridLogMessage << " beta is tiny "<<beta<<std::endl;
@@ -419,25 +382,12 @@ public:
       lmd[k] = alph;
       lme[k]  = beta;
 
-      std::cout << GridLogMessage << "Before ortho " << k << std::endl;
-
       if (k>0) { 
-	// TODO: orthogonalize should work as evec.ortho and should do all at once (be called as little as possible)
-	// can we do this? may not be possible
-	// M_ij = evec[i] . evec[j] = sum_x M_ij^x ; calculate M_ij^x for all ij and a specific x, then go throgh x and update matrix
 	orthogonalize(w,evec,k); // orthonormalise
       }
 
-      std::cout << GridLogMessage << "After ortho " << k << std::endl;
-      
-      if(k < Nm-1) evec[k+1] = w;
+      if(k < Nm-1) evec.put(k+1, w);
 
-      // release to swap if needed
-      evec.release(k);
-      evec.release(k-1);
-      evec.release(k+1);
-
-      std::cout << GridLogMessage << "Leave step " << k << std::endl;
     }
 
     void qr_decomp(DenseVector<RealD>& lmd,
@@ -691,14 +641,14 @@ public:
     }
 
     void orthogonalize(Field& w,
-		       DiskCachedFieldVector<Field>& evec,
+		       BlockedFieldVector<Field>& evec,
 		       int k)
     {
       double t0=-usecond()/1e6;
       typedef typename Field::scalar_type MyComplex;
       MyComplex ip;
 
-      if ( 0 ) {
+#if 0
 	for(int j=0; j<k; ++j){
 	  normalise(evec[j]);
 	  for(int i=0;i<j;i++){
@@ -706,24 +656,16 @@ public:
 	    evec[j] = evec[j] - ip *evec[i];
 	  }
 	}
-      }
+#endif
 
-      // TODO: can I do this better memory wise?  this leads to a N^2 read/write problem
-      //
-      // orthoganolize 'w' w.r.t the previous ones
       for(int j=0; j<k; ++j){
-	std::cout << GridLogMessage << "Get " << j << std::endl;
-        Field& evec_j = evec[j];
+        Field evec_j = evec.get(j);
 	ip = innerProduct(evec_j,w); // are the evecs normalised? ; this assumes so.
 	w = w - ip * evec_j;
-	evec.release(j);
-	std::cout << GridLogMessage << "Done " << j << std::endl;
       }
       normalise(w);
       t0+=usecond()/1e6;
       OrthoTime +=t0;
-
-      //std::cout << GridLogMessage << "Orthogonalization complete" << std::endl;
     }
 
     void setUnit_Qt(int Nm, DenseVector<RealD> &Qt) {
@@ -751,12 +693,12 @@ until convergence
 
 // alternate implementation for minimizing memory usage.  May affect the performance
     void calc(DenseVector<RealD>& eval,
-	      DiskCachedFieldVector<Field>& evec,
+	      BlockedFieldVector<Field>& evec,
 	      const Field& src,
 	      int& Nconv)
       {
 
-	GridBase *grid = evec[0]._grid;
+	GridBase *grid = evec.get(0)._grid;
 	assert(grid == src._grid);
 
 	std::cout<<GridLogMessage << " -- Nk = " << Nk << " Np = "<< Np << std::endl;
@@ -789,11 +731,12 @@ until convergence
 	// Set initial vector
 	// (uniform vector) Why not src??
 	//	evec[0] = 1.0;
-	evec[0] = src;
+	Field src_n=src;
+	normalise(src_n);
+	evec.put(0,src_n);
 	std:: cout<<GridLogMessage <<"norm2(src)= " << norm2(src)<<std::endl;
 // << src._grid  << std::endl;
-	normalise(evec[0]);
-	std:: cout<<GridLogMessage <<"norm2(evec[0])= " << norm2(evec[0]) <<std::endl;
+	std:: cout<<GridLogMessage <<"norm2(evec[0])= " << norm2(evec.get(0)) <<std::endl;
 // << evec[0]._grid << std::endl;
 	
 	// Initial Nk steps
@@ -891,16 +834,14 @@ until convergence
 
 	  // Compressed vector f and beta(k2)
 	  f *= Qt[Nm-1+Nm*(k2-1)];
-	  f += lme[k2-1] * evec[k2];
+	  f += lme[k2-1] * evec.get(k2);
 	  beta_k = norm2(f);
 	  beta_k = sqrt(beta_k);
 	  std::cout<<GridLogMessage<<" beta(k) = "<<beta_k<<std::endl;
 
 	  RealD betar = 1.0/beta_k;
-	  evec[k2] = betar * f;
+	  evec.put(k2, betar * f);
 	  lme[k2-1] = beta_k;
-
-	  evec.release(k2);
 
 	  // Convergence test
 	  for(int k=0; k<Nm; ++k){    
@@ -920,7 +861,7 @@ until convergence
 
 	{
 	  Field ev0_orig(grid);
-	  ev0_orig = evec[0];
+	  ev0_orig = evec.get(0);
 	  
 	  evec.rotate(Qt,0,Nk,0,Nk);
 	  
@@ -929,9 +870,8 @@ until convergence
 	    Field B(grid);
 	    
 	    for(int j = 0; j<Nk; ++j){
-	      B=evec[j];
-	      evec.release(j);
-	      B.checkerboard = evec[0].checkerboard;
+	      B=evec.get(j);
+	      B.checkerboard = evec.get(0).checkerboard;
 	      _Linop.HermOp(B,v);
 	      
 	      RealD vnum = real(innerProduct(B,v)); // HermOp.
@@ -985,7 +925,7 @@ until convergence
 	      assert(res_check_rotate_inverse < 1e-7);
 	      evec.rotate(QtI,0,Nk,0,Nk);
 	      
-	      axpy(ev0_orig,-1.0,evec[0],ev0_orig);
+	      axpy(ev0_orig,-1.0,evec.get(0),ev0_orig);
 	      std::cout << GridLogMessage << "Rotation done (in " << timeInv.Elapsed() << " = " << timeInv.useconds() << " us" <<
 		", error = " << res_check_rotate_inverse << 
 		"); | evec[0] - evec[0]_orig | = " << ::sqrt(norm2(ev0_orig)) << std::endl;
@@ -1010,8 +950,7 @@ until convergence
 	 
 	 // test
 	 for (int j=0;j<Nconv;j++) {
-	   std::cout<<GridLogMessage << " |e[" << j << "]|^2 = " << norm2(evec[j]) << std::endl;
-	   evec.release(j);
+	   std::cout<<GridLogMessage << " |e[" << j << "]|^2 = " << norm2(evec.get(j)) << std::endl;
 	 }
        }
 

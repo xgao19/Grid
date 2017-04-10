@@ -74,7 +74,8 @@ protected:
 public:
   typedef typename Field::vector_object vobj;
 
- DiskCachedFieldVector(int Nm,const Field& value,int Nr,char* root) : _Nr(Nr), _Nm(Nm), _v(Nr,value) {
+  // TODO: memory access problem?  add read-only access (such don't need to be written back to disk)
+  DiskCachedFieldVector(int Nm,const Field& value,int Nr,char* root) : _Nr(Nr), _Nm(Nm), _v(Nr,value) {
 
     // silly to allocate more memory than needed
     assert(Nr <= Nm);
@@ -121,6 +122,7 @@ public:
     if (i < _Nlock) {
       return _v[i];
     } else {
+
       // if vector is currently cached, return cached vector
       auto _c = _cached.find(i);
       if (_c != _cached.end())
@@ -142,7 +144,9 @@ public:
       _cached[i] = av;
       _locked_slot.insert(av);
       _slot_history.push_back(av);
-
+      
+      _v[0]._grid->Barrier();
+      std::cout << GridLogMessage << "operator[" << i << "] = _v[" << av << "/" << _v.size() << "]" << std::endl;
       return _v[av];
     }
   }
@@ -192,13 +196,13 @@ public:
   void write_vector_to_disk(int i, int av) {
     // first find out which vctor it is from _cached
     // TODO
-    std::cout << GridLogMessage << "Cache::write_slot_to_disk(" << i << ")" << std::endl;
+    std::cout << GridLogMessage << "Cache::write_slot_to_disk(" << i << ", " << av << ")" << std::endl;
   }
 
   void read_vector_from_disk(int i, int av) {
     // read vector i to memory slot av
     // TODO
-    std::cout << GridLogMessage << "Cache::read_vector_from_disk(" << i << ")" << std::endl;
+    std::cout << GridLogMessage << "Cache::read_vector_from_disk(" << i << ", " << av << ")" << std::endl;
   }
   
   /*
@@ -258,6 +262,12 @@ public:
 	// just remove lock in this vector, will be swapped back
 	// to disk if needed in operator[]
 	_locked_slot.erase(_c->second);
+
+#if 0
+	std::cout << GridLogMessage << "Currently locked:" << std::endl;
+	for (auto a = _locked_slot.cbegin(); a!=_locked_slot.cend();a++)
+	  std::cout << GridLogMessage << " -  " << *a << std::endl;
+#endif
       }
     }
   }
@@ -386,7 +396,8 @@ public:
 	      Field& w,int Nm,int k)
     {
       assert( k< Nm );
-      
+
+    
       _poly(_Linop,evec[k],w);      // 3. wk:=Avk−βkv_{k−1}
       if(k>0){
 	w -= lme[k-1] * evec[k-1];
@@ -408,9 +419,16 @@ public:
       lmd[k] = alph;
       lme[k]  = beta;
 
+      std::cout << GridLogMessage << "Before ortho " << k << std::endl;
+
       if (k>0) { 
+	// TODO: orthogonalize should work as evec.ortho and should do all at once (be called as little as possible)
+	// can we do this? may not be possible
+	// M_ij = evec[i] . evec[j] = sum_x M_ij^x ; calculate M_ij^x for all ij and a specific x, then go throgh x and update matrix
 	orthogonalize(w,evec,k); // orthonormalise
       }
+
+      std::cout << GridLogMessage << "After ortho " << k << std::endl;
       
       if(k < Nm-1) evec[k+1] = w;
 
@@ -418,6 +436,8 @@ public:
       evec.release(k);
       evec.release(k-1);
       evec.release(k+1);
+
+      std::cout << GridLogMessage << "Leave step " << k << std::endl;
     }
 
     void qr_decomp(DenseVector<RealD>& lmd,
@@ -688,14 +708,22 @@ public:
 	}
       }
 
+      // TODO: can I do this better memory wise?  this leads to a N^2 read/write problem
+      //
+      // orthoganolize 'w' w.r.t the previous ones
       for(int j=0; j<k; ++j){
-	ip = innerProduct(evec[j],w); // are the evecs normalised? ; this assumes so.
-	w = w - ip * evec[j];
+	std::cout << GridLogMessage << "Get " << j << std::endl;
+        Field& evec_j = evec[j];
+	ip = innerProduct(evec_j,w); // are the evecs normalised? ; this assumes so.
+	w = w - ip * evec_j;
 	evec.release(j);
+	std::cout << GridLogMessage << "Done " << j << std::endl;
       }
       normalise(w);
       t0+=usecond()/1e6;
       OrthoTime +=t0;
+
+      //std::cout << GridLogMessage << "Orthogonalization complete" << std::endl;
     }
 
     void setUnit_Qt(int Nm, DenseVector<RealD> &Qt) {

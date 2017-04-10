@@ -55,7 +55,7 @@ void LAPACK_dstegr(char *jobz, char *range, int *n, double *d, double *e,
 
 namespace Grid {
 
-  template<Coeff_t,Field>
+template<typename Coeff_t,typename Field>
 class BlockedGrid {
 public:
   GridBase* _grid;
@@ -94,14 +94,14 @@ public:
     std::cout << GridLogMessage << " _f_block_size = " << _f_block_size << std::endl;
   }
 
-    std::complex<Coeff_t> block_sp(int b, const Field& x, const Field& y) {
+    Coeff_t block_sp(int b, const Field& x, const Field& y) {
       return 0.0;
     }
 
-    void block_caxpy(int b, Field& ret, const std::complex<Coeff_t>& a, const Field& x, const Field& y) {
+    void block_caxpy(int b, Field& ret, const Coeff_t& a, const Field& x, const Field& y) {
     }
 
-    void block_cscale(int b, const std::complex<Coeff_t>& a, Field& ret) {
+    void block_cscale(int b, const Coeff_t& a, Field& ret) {
     }
 
 };
@@ -118,7 +118,7 @@ protected:
   BlockedGrid<Coeff_t,Field> _bgrid;
   
   std::vector<Field> _v; // _Nfull vectors
-  std::vector< std::complex<Coeff_t> > _c;
+  std::vector< Coeff_t > _c;
 
   bool _full_locked;
   
@@ -144,28 +144,32 @@ public:
   }
 
 #define cidx(i,b,j) ((int64_t)b + (int64_t)_bgrid._blocks * (int64_t)(j + _Nfull*i))
-  void set_coef(int i, int b, int j, const std::complex<Coeff_t>& v) {
+  void set_coef(int i, int b, int j, const Coeff_t& v) {
     _c[ cidx(i,b,j) ] = v;
   }
 
   void lock_in_first_vectors() {
+    GridStopWatch sw;
+    sw.Start();
     // orthogonalize local blocks and create coefficients for first Nfull vectors
 #pragma omp parallel
     for (int b=0;b<_bgrid._blocks;b++) {
       for (int i=0;i<_Nfull;i++) {
 	// |i> -= <j|i> |j>
 	for (int j=0;j<i;j++) {
-	  std::complex<Coeff_t> v = _bgrid.block_sp(b,_v[j],_v[i]);
+	  Coeff_t v = _bgrid.block_sp(b,_v[j],_v[i]);
 	  set_coef(i,b,j,v);
 	  _bgrid.block_caxpy(b,_v[i],-v,_v[j],_v[i]);
 	}
 
-	std::complex<RealD> nrm = _bgrid.block_sp(b,_v[i],_v[i]);
+	Coeff_t nrm = _bgrid.block_sp(b,_v[i],_v[i]);
 	set_coef(i,b,i,sqrt(nrm));
 	
 	_bgrid.block_cscale(b,1.0 / sqrt(nrm),_v[i]);
       }
     }
+    sw.End();
+    std::cout << GridLogMessage << "Gram-Schmidt to create blocked basis took " << sw.Elapsed() << std::endl;
   }
 
   Field get_blocked(int i) {

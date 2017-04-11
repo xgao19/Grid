@@ -154,9 +154,33 @@ public:
     }
 
     void block_caxpy(int b, Field& ret, const Coeff_t& a, const Field& x, const Field& y) {
+
+      std::vector<int> x0;
+      block_to_coor(b,x0);
+      
+      int p4d;
+      for (int i=0;i<_o_block_sites;i++) { // only odd sites
+	int ss = block_site_to_o_site(x0,i,p4d);
+	if (p4d == 1) {
+	  ret._odata[ss] = a*x._odata[ss] + y._odata[ss];
+	}
+      }
+
     }
 
     void block_cscale(int b, const Coeff_t& a, Field& ret) {
+
+      std::vector<int> x0;
+      block_to_coor(b,x0);
+      
+      int p4d;
+      for (int i=0;i<_o_block_sites;i++) { // only odd sites
+	int ss = block_site_to_o_site(x0,i,p4d);
+	if (p4d == 1) {
+	  ret._odata[ss] = a * ret._odata[ss];
+	}
+      }
+
     }
 
 };
@@ -209,7 +233,7 @@ public:
     GridStopWatch sw;
     sw.Start();
     // orthogonalize local blocks and create coefficients for first Nfull vectors
-#pragma omp parallel
+#pragma omp parallel for
     for (int b=0;b<_bgrid._blocks;b++) {
       for (int i=0;i<_Nfull;i++) {
 	// |i> -= <j|i> |j>
@@ -231,9 +255,17 @@ public:
   }
 
   Field get_blocked(int i) {
-    printf("get_blocked not yet implemented\n");
-    abort();
-    return _v[0];
+
+    Field ret(_bgrid._grid);
+    ret = zero;
+
+#pragma omp parallel for
+    for (int b=0;b<_bgrid._blocks;b++) {
+      for (int j=0;j<_Nfull;j++)
+	_bgrid.block_caxpy(b,ret,_c[ cidx(i,b,j) ],_v[j],ret);
+    }
+    
+    return ret;
   }
 
   void put_blocked(int i, const Field& v) {
@@ -255,7 +287,15 @@ public:
     if (!_full_locked && i >= _Nfull) {
       // lock in smallest vectors so we can build on them
       _full_locked = true;
+
+      Field test_vN = _v[_Nfull - 4];
       lock_in_first_vectors();
+      Field test_vNp = get_blocked(_Nfull - 4);
+      axpy(test_vNp,-1.0,test_vN,test_vNp);
+      std::cout << GridLogMessage << "Test: " << norm2(test_vN) << " eps = " << norm2(test_vNp) << std::endl;
+
+      _bgrid._grid->Barrier();
+      abort();
     }
 
     if (!_full_locked) {

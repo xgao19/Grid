@@ -61,29 +61,39 @@ public:
   GridBase* _grid;
   
   std::vector<int> _bs; // block size
-  std::vector<int> _o_bs; // block size in terms of simd o-sites
   std::vector<int> _nb; // number of blocks
-  std::vector<int> _l;  // local dimensions irrespective of eo
-  std::vector<int> _o_l;  // local dimensions irrespective of eo in terms of simd o-sites
+  std::vector<int> _l;  // local dimensions irrespective of cb
+  std::vector<int> _l_cb;  // local dimensions of checkerboarded vector
+  std::vector<int> _bs_cb; // block size in checkerboarded vector
+  std::vector<int> _l_cb_o;  // local dimensions in terms of cb and simd o-sites
+  std::vector<int> _bs_cb_o; // block size in terms of cb and simd o-sites
+
   int _nd, _blocks, _cf_size, _cf_block_size, _o_sites, _o_block_sites;
   
   BlockedGrid(GridBase* grid, const std::vector<int>& block_size) :
     _grid(grid), _bs(block_size), _nd((int)_bs.size()), 
-      _nb(block_size), _l(block_size), _o_bs(block_size),
-      _o_l(block_size) {
+      _nb(block_size), _l(block_size), _bs_cb_o(block_size),
+      _l_cb_o(block_size), _bs_cb(block_size) {
 
     _blocks = 1;
     _l = grid->FullDimensions();
+    _l_cb = grid->LocalDimensions();
+
     _cf_size = 1;
     _o_sites = 1;
 
     for (int i=0;i<_nd;i++) {
       _l[i] /= grid->_processors[i];
-      _o_l[i] = _l[i] / _grid->_simd_layout[i];
-      _o_sites *= _o_l[i];
-      assert(!(_l[i] % _bs[i]));
-      assert(!(_bs[i] % _grid->_simd_layout[i]));
-      _o_bs[i] = _bs[i] / _grid->_simd_layout[i];
+
+      assert(!(_l[i] % _bs[i])); // lattice must accommodate choice of blocksize
+
+      int r = _l[i] / _l_cb[i];
+      assert(!(_bs[i] % r)); // checkerboarding must accommodate choice of blocksize
+      _bs_cb[i] = _bs[i] / r;
+      _l_cb_o[i] = _l_cb[i] / _grid->_simd_layout[i]; // this is already guaranteed to divide
+      _o_sites *= _l_cb_o[i];
+      assert(!(_bs_cb[i] % _grid->_simd_layout[i])); // simd must accommodate choice of blocksize
+      _bs_cb_o[i] = _bs_cb[i] / _grid->_simd_layout[i];
       _nb[i] = _l[i] / _bs[i];
       _blocks *= _nb[i];
       _cf_size *= _l[i];
@@ -95,9 +105,11 @@ public:
 
     std::cout << GridLogMessage << "BlockedGrid:" << std::endl;
     std::cout << GridLogMessage << " _l     = " << _l << std::endl;
-    std::cout << GridLogMessage << " _o_l     = " << _o_l << std::endl;
+    std::cout << GridLogMessage << " _l_cb     = " << _l_cb << std::endl;
+    std::cout << GridLogMessage << " _l_cb_o     = " << _l_cb_o << std::endl;
     std::cout << GridLogMessage << " _bs    = " << _bs << std::endl;
-    std::cout << GridLogMessage << " _o_bs    = " << _o_bs << std::endl;
+    std::cout << GridLogMessage << " _bs_cb    = " << _bs_cb << std::endl;
+    std::cout << GridLogMessage << " _bs_cb_o    = " << _bs_cb_o << std::endl;
     std::cout << GridLogMessage << " _nb    = " << _nb << std::endl;
     std::cout << GridLogMessage << " _blocks = " << _blocks << std::endl;
     std::cout << GridLogMessage << " sizeof(Coeff_t) = " << sizeof(Coeff_t) << std::endl;
@@ -107,6 +119,8 @@ public:
     std::cout << GridLogMessage << " _o_block_sites = " << _o_block_sites << std::endl;
     std::cout << GridLogMessage << " _grid->oSites() = " << _grid->oSites() << std::endl;
 
+    //    _grid->Barrier();
+    //abort();
   }
 
     void block_to_coor(int b, std::vector<int>& x0) {
@@ -118,37 +132,35 @@ public:
       int i;
 
       for (i=0;i<_nd;i++) {
-	x0[i] = bcoor[i]*_o_bs[i];
+	x0[i] = bcoor[i]*_bs_cb_o[i];
       }
 
       //std::cout << GridLogMessage << "Map block b -> " << x0 << " -- " << x1 << std::endl;
 
     }
 
-    int block_site_to_o_site(const std::vector<int>& x0, int i, int& parity4d) {
+    int block_site_to_o_site(const std::vector<int>& x0, int i) {
       std::vector<int> coor;  coor.resize(_nd);
-      Lexicographic::CoorFromIndex(coor,i,_o_bs);
+      Lexicographic::CoorFromIndex(coor,i,_bs_cb_o);
       for (int j=0;j<_nd;j++)
 	coor[j] += x0[j];
-      parity4d = (coor[1] + coor[2] + coor[3] + coor[4]) % 2;
-      int idx4d = coor[1] + _o_l[1]*(coor[2] + _o_l[2]*(coor[3] + _o_l[3]*coor[4]));
-      idx4d /= 2;
-      return coor[0] + _o_l[0]*idx4d;
+      Lexicographic::IndexFromCoor(coor,i,_l_cb_o);
+      return i;
     }
 
     ComplexD block_sp(int b, const Field& x, const Field& y) {
 
       std::vector<int> x0;
       block_to_coor(b,x0);
+
+      //std::cout << GridLogMessage << "Coor x0 = " << x0 << std::endl;
       
       ComplexD ret = 0.0;
-      int p4d;
 
       for (int i=0;i<_o_block_sites;i++) { // only odd sites
-	int ss = block_site_to_o_site(x0,i,p4d);
-	if (p4d == 1) {
-	  ret += Reduce(TensorRemove(innerProduct(x._odata[ss],y._odata[ss])));
-	}
+	int ss = block_site_to_o_site(x0,i);
+	//std::cout << GridLogMessage << i << "/" << _o_block_sites << " -> " << ss << std::endl;
+	ret += Reduce(TensorRemove(innerProduct(x._odata[ss],y._odata[ss])));
       }
       return ret;
     }
@@ -158,12 +170,9 @@ public:
       std::vector<int> x0;
       block_to_coor(b,x0);
       
-      int p4d;
       for (int i=0;i<_o_block_sites;i++) { // only odd sites
-	int ss = block_site_to_o_site(x0,i,p4d);
-	if (p4d == 1) {
-	  ret._odata[ss] = a*x._odata[ss] + y._odata[ss];
-	}
+	int ss = block_site_to_o_site(x0,i);
+	ret._odata[ss] = a*x._odata[ss] + y._odata[ss];
       }
 
     }
@@ -173,12 +182,9 @@ public:
       std::vector<int> x0;
       block_to_coor(b,x0);
       
-      int p4d;
       for (int i=0;i<_o_block_sites;i++) { // only odd sites
-	int ss = block_site_to_o_site(x0,i,p4d);
-	if (p4d == 1) {
-	  ret._odata[ss] = a * ret._odata[ss];
-	}
+	int ss = block_site_to_o_site(x0,i);
+	ret._odata[ss] = a * ret._odata[ss];
       }
 
     }
@@ -204,7 +210,7 @@ protected:
 public:
 
   BlockedFieldVector(int Nm,GridBase* value,int Nfull,const std::vector<int>& block_size) : 
-  _Nfull(Nfull), _Nm(Nm), _v(_Nm,value), _bgrid(value,block_size), _full_locked(false) {
+  _Nfull(Nfull), _Nm(Nm), _v(Nfull,value), _bgrid(value,block_size), _full_locked(false) {
 
     _c.resize(_Nm*_Nfull*_bgrid._blocks);
 #pragma omp parallel for
@@ -230,6 +236,7 @@ public:
   }
 
   void lock_in_first_vectors() {
+
     GridStopWatch sw;
     sw.Start();
     // orthogonalize local blocks and create coefficients for first Nfull vectors
@@ -252,12 +259,38 @@ public:
     sw.Stop();
     std::cout << GridLogMessage << "Gram-Schmidt to create blocked basis took " << sw.Elapsed() << std::endl;
 
+#if 0
+    // test blocked sp
+    Coeff_t sm = 0.0;
+    for (int b=0;b<_bgrid._blocks;b++) {
+      sm += (Coeff_t)_bgrid.block_sp(b,_v[_Nfull-1],_v[_Nfull-1]);
+    }
+    _bgrid._grid->GlobalSum(sm);
+    Coeff_t tot = (Coeff_t)innerProduct(_v[_Nfull-1],_v[_Nfull-1]);
+    std::cout << GridLogMessage << " sm = " << sm << " tot = " << tot << std::endl;
+
+    // test basis
+    for (int j=0;j<_Nfull;j++) {
+      for (int b=0;b<_bgrid._blocks;b++) {
+	auto nrm2 = _bgrid.block_sp(b,_v[j],_v[j]);
+	std::cout << GridLogMessage << "TEST b = " << b << " j = " << j
+		  << " nrm2(_v) = " << nrm2 
+		  << " ortho[j,1] = " << _bgrid.block_sp(b,_v[j],_v[1]) << std::endl;
+	
+      }
+
+      _bgrid._grid->Barrier();
+      abort();
+    }
+#endif
+
   }
 
   Field get_blocked(int i) {
 
     Field ret(_bgrid._grid);
     ret = zero;
+    ret.checkerboard = _v[0].checkerboard;
 
 #pragma omp parallel for
     for (int b=0;b<_bgrid._blocks;b++) {
@@ -268,8 +301,33 @@ public:
     return ret;
   }
 
-  void put_blocked(int i, const Field& v) {
-    printf("put_blocked not yet implemented\n");
+  void put_blocked(int i, const Field& rhs) {
+
+#pragma omp parallel for
+    for (int b=0;b<_bgrid._blocks;b++) {
+      for (int j=0;j<_Nfull;j++) {
+	// |rhs> -= <j|rhs> |j>
+	Coeff_t v = (Coeff_t)_bgrid.block_sp(b,_v[j],rhs);
+	set_coef(i,b,j,v);
+      }
+    }
+
+#if 0
+    std::cout << GridLogMessage << "------------------" << std::endl;
+    for (int b=0;b<_bgrid._blocks;b++) {
+      for (int j=0;j<_Nfull;j++) {
+    std::cout << GridLogMessage << " c[" << i << ", " << b << ", " << j << "] = " << _c[ cidx(i,b,j) ] << std::endl;
+  }
+  }
+
+    std::cout << GridLogMessage << "------------------" << std::endl;
+
+    if (i==31) {
+    _bgrid._grid->Barrier();
+    abort();
+    }
+#endif
+
   }
 
   Field get(int i) {
@@ -282,20 +340,16 @@ public:
   }
 
   void put(int i, const Field& v) {
-    std::cout << GridLogMessage << "::put(" << i << ")\n";
+    //std::cout << GridLogMessage << "::put(" << i << ")\n";
 
     if (!_full_locked && i >= _Nfull) {
       // lock in smallest vectors so we can build on them
       _full_locked = true;
-
-      Field test_vN = _v[_Nfull - 4];
+      
+      Field test = _v[_Nfull - 1];
       lock_in_first_vectors();
-      Field test_vNp = get_blocked(_Nfull - 4);
-      axpy(test_vNp,-1.0,test_vN,test_vNp);
-      std::cout << GridLogMessage << "Test: " << norm2(test_vN) << " eps = " << norm2(test_vNp) << std::endl;
-
-      _bgrid._grid->Barrier();
-      abort();
+      axpy(test,-1.0,get_blocked(_Nfull - 1),test);
+      std::cout << GridLogMessage << "Error of lock_in_first_fectors: " << norm2(test) << std::endl;
     }
 
     if (!_full_locked) {
@@ -303,12 +357,19 @@ public:
       _v[i] = v;
     } else {
       put_blocked(i,v);
+
+      Field test = get_blocked(i);
+      RealD nrm2b = norm2(test);
+      axpy(test,-1.0,v,test);
+      std::cout << GridLogMessage << "Error of vector: " << norm2(test) << " nrm2 = " << norm2(v) << " vs " << nrm2b << std::endl;
     }
   }
 
   void rotate(DenseVector<RealD>& Qt,int j0, int j1, int k0,int k1) {
     GridBase* grid = _v[0]._grid;
-
+    
+    if (!_full_locked) {
+      
 #pragma omp parallel
       {
 	std::vector < vobj > B(_Nm);
@@ -327,7 +388,37 @@ public:
 	  }
 	}
       }
+    } else {
 
+      // B_j = Q_jk A_k
+      // A_k = _c[ k, bj ] _v[bj]
+      // B_j = Q_jk _c[ k, bl ] _v[bl]
+      // -> _c[ j, bl ] = Q_jk _c[ k, bl ]
+#pragma omp parallel
+      {
+        std::vector<Coeff_t> c0;
+	c0.resize(_Nfull*_Nm);
+
+#pragma omp for
+        for (int b=0;b<_bgrid._blocks;b++) {
+          for (int l=0;l<_Nfull;l++) {
+	    for(int j=j0; j<j1; ++j){
+	      Coeff_t& cc = c0[l + _Nfull*j];
+	      cc = 0.0;
+	      for(int k=k0; k<k1; ++k){
+		cc +=Qt[k+_Nm*j] * _c[ cidx(k,b,l) ];
+	      }
+	    }
+          }
+	  for (int l=0;l<_Nfull;l++) {
+	    for(int j=j0; j<j1; ++j){
+	      _c[ cidx(j,b,l) ] = c0[l + _Nfull*j];
+	    }
+	  }
+	}
+      }
+      
+    }
   }
 
   size_t size() const {
@@ -464,6 +555,15 @@ public:
       Field evec_k = evec.get(k);
 
       _poly(_Linop,evec_k,w);      // 3. wk:=Avk−βkv_{k−1}
+
+#if 0
+      // Should we adopt the compression?
+      if (k < Nm - 1) {
+	evec.put(k+1,w);
+	w = evec.get(k+1);
+      }
+#endif
+
       if(k>0){
 	w -= lme[k-1] * evec.get(k-1);
       }    
@@ -488,7 +588,10 @@ public:
 	orthogonalize(w,evec,k); // orthonormalise
       }
 
-      if(k < Nm-1) evec.put(k+1, w);
+      if(k < Nm-1) { 
+	evec.put(k+1, w);
+	//w = evec.get(k+1);  // adopt compression for w?
+      }
 
     }
 

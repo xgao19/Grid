@@ -32,8 +32,8 @@ Author: Christoph Lehner <clehner@bnl.gov>
 #define GRID_IRL_H
 
 #include <Grid/Eigen/Dense>
-#include <set>
-#include <list>
+//#include <set>
+//#include <list>
 
 #include <string.h> //memset
 #ifdef USE_LAPACK
@@ -61,41 +61,96 @@ public:
   GridBase* _grid;
   
   std::vector<int> _bs; // block size
+  std::vector<int> _o_bs; // block size in terms of simd o-sites
   std::vector<int> _nb; // number of blocks
   std::vector<int> _l;  // local dimensions irrespective of eo
-  int _nd, _blocks, _f_size, _f_block_size;
+  std::vector<int> _o_l;  // local dimensions irrespective of eo in terms of simd o-sites
+  int _nd, _blocks, _cf_size, _cf_block_size, _o_sites, _o_block_sites;
   
   BlockedGrid(GridBase* grid, const std::vector<int>& block_size) :
     _grid(grid), _bs(block_size), _nd((int)_bs.size()), 
-    _nb(block_size), _l(block_size) {
+      _nb(block_size), _l(block_size), _o_bs(block_size),
+      _o_l(block_size) {
 
     _blocks = 1;
     _l = grid->FullDimensions();
-    _f_size = 1;
+    _cf_size = 1;
+    _o_sites = 1;
 
     for (int i=0;i<_nd;i++) {
       _l[i] /= grid->_processors[i];
+      _o_l[i] = _l[i] / _grid->_simd_layout[i];
+      _o_sites *= _o_l[i];
       assert(!(_l[i] % _bs[i]));
+      assert(!(_bs[i] % _grid->_simd_layout[i]));
+      _o_bs[i] = _bs[i] / _grid->_simd_layout[i];
       _nb[i] = _l[i] / _bs[i];
       _blocks *= _nb[i];
-      _f_size *= _l[i];
+      _cf_size *= _l[i];
     }
 
-    _f_size *= 24 / 2;
-    _f_block_size = _f_size / _blocks;
+    _cf_size *= 12 / 2;
+    _cf_block_size = _cf_size / _blocks;
+    _o_block_sites = _o_sites / _blocks;
 
-    std::cout << GridLogMessage << "BlockedGrid:\n" << std::endl;
+    std::cout << GridLogMessage << "BlockedGrid:" << std::endl;
     std::cout << GridLogMessage << " _l     = " << _l << std::endl;
+    std::cout << GridLogMessage << " _o_l     = " << _o_l << std::endl;
     std::cout << GridLogMessage << " _bs    = " << _bs << std::endl;
+    std::cout << GridLogMessage << " _o_bs    = " << _o_bs << std::endl;
     std::cout << GridLogMessage << " _nb    = " << _nb << std::endl;
     std::cout << GridLogMessage << " _blocks = " << _blocks << std::endl;
     std::cout << GridLogMessage << " sizeof(Coeff_t) = " << sizeof(Coeff_t) << std::endl;
-    std::cout << GridLogMessage << " _f_size = " << _f_size << std::endl;
-    std::cout << GridLogMessage << " _f_block_size = " << _f_block_size << std::endl;
+    std::cout << GridLogMessage << " _cf_size = " << _cf_size << std::endl;
+    std::cout << GridLogMessage << " _cf_block_size = " << _cf_block_size << std::endl;
+    std::cout << GridLogMessage << " _o_sites = " << _o_sites << std::endl;
+    std::cout << GridLogMessage << " _o_block_sites = " << _o_block_sites << std::endl;
+    std::cout << GridLogMessage << " _grid->oSites() = " << _grid->oSites() << std::endl;
+
   }
 
-    Coeff_t block_sp(int b, const Field& x, const Field& y) {
-      return 0.0;
+    void block_to_coor(int b, std::vector<int>& x0) {
+
+      std::vector<int> bcoor;
+      bcoor.resize(_nd);
+      x0.resize(_nd);
+      Lexicographic::CoorFromIndex(bcoor,b,_nb);
+      int i;
+
+      for (i=0;i<_nd;i++) {
+	x0[i] = bcoor[i]*_o_bs[i];
+      }
+
+      //std::cout << GridLogMessage << "Map block b -> " << x0 << " -- " << x1 << std::endl;
+
+    }
+
+    int block_site_to_o_site(const std::vector<int>& x0, int i, int& parity4d) {
+      std::vector<int> coor;  coor.resize(_nd);
+      Lexicographic::CoorFromIndex(coor,i,_o_bs);
+      for (int j=0;j<_nd;j++)
+	coor[j] += x0[j];
+      parity4d = (coor[1] + coor[2] + coor[3] + coor[4]) % 2;
+      int idx4d = coor[1] + _o_l[1]*(coor[2] + _o_l[2]*(coor[3] + _o_l[3]*coor[4]));
+      idx4d /= 2;
+      return coor[0] + _o_l[0]*idx4d;
+    }
+
+    ComplexD block_sp(int b, const Field& x, const Field& y) {
+
+      std::vector<int> x0;
+      block_to_coor(b,x0);
+      
+      ComplexD ret = 0.0;
+      int p4d;
+
+      for (int i=0;i<_o_block_sites;i++) { // only odd sites
+	int ss = block_site_to_o_site(x0,i,p4d);
+	if (p4d == 1) {
+	  ret += Reduce(TensorRemove(innerProduct(x._odata[ss],y._odata[ss])));
+	}
+      }
+      return ret;
     }
 
     void block_caxpy(int b, Field& ret, const Coeff_t& a, const Field& x, const Field& y) {
@@ -137,6 +192,8 @@ public:
     std::cout << GridLogMessage << " Nfull = " << Nfull << "\n";
     std::cout << GridLogMessage << " Size of coefficients = " << 
       ((double)_c.size()*sizeof(Coeff_t) / 1024./1024./1024.) << " GB\n";
+    std::cout << GridLogMessage << " Size of full vectors = " << 
+      ((double)_v.size()*sizeof(Coeff_t)*_bgrid._cf_size / 1024./1024./1024.) << " GB\n";
   }
   
   ~BlockedFieldVector() {
@@ -157,19 +214,20 @@ public:
       for (int i=0;i<_Nfull;i++) {
 	// |i> -= <j|i> |j>
 	for (int j=0;j<i;j++) {
-	  Coeff_t v = _bgrid.block_sp(b,_v[j],_v[i]);
+	  Coeff_t v = (Coeff_t)_bgrid.block_sp(b,_v[j],_v[i]);
 	  set_coef(i,b,j,v);
 	  _bgrid.block_caxpy(b,_v[i],-v,_v[j],_v[i]);
 	}
 
-	Coeff_t nrm = _bgrid.block_sp(b,_v[i],_v[i]);
+	Coeff_t nrm = (Coeff_t)_bgrid.block_sp(b,_v[i],_v[i]);
 	set_coef(i,b,i,sqrt(nrm));
 	
 	_bgrid.block_cscale(b,1.0 / sqrt(nrm),_v[i]);
       }
     }
-    sw.End();
+    sw.Stop();
     std::cout << GridLogMessage << "Gram-Schmidt to create blocked basis took " << sw.Elapsed() << std::endl;
+
   }
 
   Field get_blocked(int i) {

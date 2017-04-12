@@ -193,7 +193,7 @@ public:
   
 template<class Field>
 class BlockedFieldVector {
-protected:
+ public:
   int _Nm,  // number of total vectors
     _Nfull; // number of vectors kept in full precision
 
@@ -207,7 +207,7 @@ protected:
 
   bool _full_locked;
   
-public:
+  //public:
 
   BlockedFieldVector(int Nm,GridBase* value,int Nfull,const std::vector<int>& block_size) : 
   _Nfull(Nfull), _Nm(Nm), _v(Nfull,value), _bgrid(value,block_size), _full_locked(false) {
@@ -235,7 +235,10 @@ public:
     _c[ cidx(i,b,j) ] = v;
   }
 
-  void lock_in_first_vectors() {
+  void lock_in_full_vectors() {
+
+    assert(!_full_locked);
+    _full_locked = true;
 
     GridStopWatch sw;
     sw.Start();
@@ -344,12 +347,10 @@ public:
 
     if (!_full_locked && i >= _Nfull) {
       // lock in smallest vectors so we can build on them
-      _full_locked = true;
-      
       Field test = _v[_Nfull - 1];
-      lock_in_first_vectors();
+      lock_in_full_vectors();
       axpy(test,-1.0,get_blocked(_Nfull - 1),test);
-      std::cout << GridLogMessage << "Error of lock_in_first_fectors: " << norm2(test) << std::endl;
+      std::cout << GridLogMessage << "Error of lock_in_full_vectors: " << norm2(test) << std::endl;
     }
 
     if (!_full_locked) {
@@ -576,7 +577,7 @@ public:
       RealD beta = normalise(w); // 6. βk+1 := ∥wk∥2. If βk+1 = 0 then Stop
                                  // 7. vk+1 := wk/βk+1
 
-      std::cout<<GridLogMessage << "alpha = " << zalph << " beta "<<beta<<std::endl;
+      std::cout<<GridLogMessage << "alpha[" << k << "] = " << zalph << " beta[" << k << "] = "<<beta<<std::endl;
       const RealD tiny = 1.0e-20;
       if ( beta < tiny ) { 
 	std::cout<<GridLogMessage << " beta is tiny "<<beta<<std::endl;

@@ -467,9 +467,11 @@ class BlockedFieldVector {
     std::vector<int> slot_lvol, lvol;
     int _nd = (int)nodes.size();
     int i, ntotal = 1;
+    int64_t lsites = 1;
     for (i=0;i<_nd;i++) {
       slot_lvol.push_back(_bgrid._grid->FullDimensions()[i] / nodes[i]);
       lvol.push_back(_bgrid._grid->FullDimensions()[i] / _bgrid._grid->_processors[i]);
+      lsites *= lvol.back();
       ntotal *= nodes[i];
     }
 
@@ -487,75 +489,81 @@ class BlockedFieldVector {
     slcoor.resize(_nd);
 
     _bgrid._grid->ProcessorCoorFromRank(_bgrid._grid->ThisRank(),pcoor);
-    
-    for (lcoor[0] = 0; lcoor[0] < lvol[0]; lcoor[0]++) {
-      for (lcoor[1] = 0; lcoor[1] < lvol[1]; lcoor[1]++) {
-	for (lcoor[2] = 0; lcoor[2] < lvol[2]; lcoor[2]++) {
-	  for (lcoor[3] = 0; lcoor[3] < lvol[3]; lcoor[3]++) {
-	    for (lcoor[4] = 0; lcoor[4] < lvol[4]; lcoor[4]++) {
-	      for (int i=0;i<_nd;i++) {
-		gcoor[i] = lcoor[i] + pcoor[i]*lvol[i]; // this is somewhat wrong?
-		scoor[i] = gcoor[i] / slot_lvol[i];
-		slcoor[i] = gcoor[i] - scoor[i]*slot_lvol[i];
-	      }
-	      int slot;
-	      Lexicographic::IndexFromCoor(scoor,slot,nodes);
 
-	      // make sure slot is loaded
-	      auto sl = slots.find(slot);
-	      if (sl == slots.end()) {
-		// load slot
-		slots[slot] = std::vector<float>();
-		std::vector<float>&rdata = slots[slot];
-
-		char buf[4096];
-		sprintf(buf,"%s/%2.2d/%10.10d",dir,slot/nperdir,slot);
-		FILE* f = fopen(buf,"rb");
-		assert(f);
-
-		fseeko(f,0,SEEK_END);
-		int64_t size = ftello(f);
-
-		rdata.resize(size / 4);
-
-		fseeko(f,0,SEEK_SET);
-
-		GridStopWatch gsw;
-		gsw.Start();
-		assert(fread(&rdata[0],size,1,f) == 1);
-		gsw.Stop();
-
-		fclose(f);
-
-		GridStopWatch gsw2;
-		gsw2.Start();
-		uint32_t crc = crc32_threaded((unsigned char*)&rdata[0],size);
-		gsw2.Stop();
-
-		sprintf(buf,"%s/checksums.txt",dir);
-		f = fopen(buf,"rt");
-		assert(f);
-		for (int l=0;l<3+slot;l++)
-		  fgets(buf,sizeof(buf),f);
-		uint32_t crc_exp = strtol(buf, NULL, 16);
-		fclose(f);
-
-		std::cout << GridLogMessage << "Loading slot " << slot <<
-		  " in " << gsw.Elapsed() << " at " 
-			  << ( (double)size / 1024./1024./1024. / gsw.useconds()*1000.*1000. )
-			  << " GB/s " << " crc32 = " << std::hex << crc << " crc32_expected = " << std::hex << crc_exp
-		          << " computed at "
-			  << ( (double)size / 1024./1024./1024. / gsw2.useconds()*1000.*1000. )
-            		  << " GB/s "
-			  << std::endl;		
-
-		assert(crc == crc_exp);
-	      }
-	    }
-	  }
-	}
+    for (int lidx = 0; lidx < lsites; lidx++) {
+      Lexicographic::CoorFromIndex(lcoor,lidx,lvol);
+      for (int i=0;i<_nd;i++) {
+	gcoor[i] = lcoor[i] + pcoor[i]*lvol[i]; // this is somewhat wrong?
+	scoor[i] = gcoor[i] / slot_lvol[i];
+	slcoor[i] = gcoor[i] - scoor[i]*slot_lvol[i];
+      }
+      int slot;
+      Lexicographic::IndexFromCoor(scoor,slot,nodes);
+      
+      // make sure slot is loaded
+      auto sl = slots.find(slot);
+      if (sl == slots.end()) {
+	// load slot
+	slots[slot] = std::vector<float>();
+	std::vector<float>&rdata = slots[slot];
+	
+	char buf[4096];
+	sprintf(buf,"%s/%2.2d/%10.10d",dir,slot/nperdir,slot);
+	FILE* f = fopen(buf,"rb");
+	assert(f);
+	
+	fseeko(f,0,SEEK_END);
+	int64_t size = ftello(f);
+	
+	rdata.resize(size / 4);
+	
+	fseeko(f,0,SEEK_SET);
+	
+	GridStopWatch gsw;
+	gsw.Start();
+	assert(fread(&rdata[0],size,1,f) == 1);
+	gsw.Stop();
+	
+	fclose(f);
+	
+	GridStopWatch gsw2;
+	gsw2.Start();
+	uint32_t crc = crc32_threaded((unsigned char*)&rdata[0],size);
+	gsw2.Stop();
+	
+	sprintf(buf,"%s/checksums.txt",dir);
+	f = fopen(buf,"rt");
+	assert(f);
+	for (int l=0;l<3+slot;l++)
+	  fgets(buf,sizeof(buf),f);
+	uint32_t crc_exp = strtol(buf, NULL, 16);
+	fclose(f);
+	
+	std::cout << GridLogMessage << "Loading slot " << slot <<
+	  " in " << gsw.Elapsed() << " at " 
+		  << ( (double)size / 1024./1024./1024. / gsw.useconds()*1000.*1000. )
+		  << " GB/s " << " crc32 = " << std::hex << crc << " crc32_expected = " << std::hex << crc_exp
+		  << " computed at "
+		  << ( (double)size / 1024./1024./1024. / gsw2.useconds()*1000.*1000. )
+		  << " GB/s "
+		  << std::endl;		
+	
+	assert(crc == crc_exp);
       }
     }
+
+    // and now another parallel one to poke the data
+    /*
+	      // poke 
+	      SpinColourVector sc;
+	      for (int s=0;s<4;s++)
+		for (int c=0;c<3;c++)
+		  sc()(s)(c) = std::complex<double>( 1.0, 1.0 );
+	      
+	      pokeLocalSite(sc,src,coor);
+
+
+    */
 
     _bgrid._grid->Barrier();
     std::cout << GridLogMessage  << "Loading complete" << std::endl;

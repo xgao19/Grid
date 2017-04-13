@@ -401,17 +401,23 @@ class BinaryIO {
 
     int myrank = grid->ThisRank();
 
+    // only read relevant slice in last dimension that is not 1
+    int slice_dim;
+    for (slice_dim = nd-1; slice_dim >= 0; slice_dim--)
+      if (grid->_ldimensions[slice_dim]!=1)
+	break;
+    auto slice_vol = grid->_gsites / grid->_processors[slice_dim];
+    auto slice_offset = grid->_processor_coor[slice_dim]*slice_vol;
+
     fin.open(file,std::ios::binary|std::ios::in);
     fin.seekg(0,std::ios_base::end);
-    assert((fin.tellg() - offset) % sizeof(fobj) == 0);
-    auto elems = (fin.tellg()-offset) / sizeof(fobj);
-    fin.seekg(offset);
-    fbuf.resize(elems);
+    fbuf.resize(slice_vol);
     GridStopWatch gsw; gsw.Start();
-    fin.read((char *)&fbuf[0],sizeof(fobj)*elems);assert( fin.fail()==0);
+    fin.seekg(sizeof(fobj)*slice_offset+offset);
+    fin.read((char *)&fbuf[0],sizeof(fobj)*slice_vol);assert( fin.fail()==0);
     gsw.Stop();
-    RealD gbs = elems*sizeof(fobj) / 1073.741824 / gsw.useconds();
-    std::cout << "Node " << myrank << " reads " << elems << " objects from " << file << 
+    RealD gbs = slice_vol*sizeof(fobj) / 1073.741824 / gsw.useconds();
+    std::cout << "Node " << myrank << " reads " << slice_vol << " objects from " << file << 
       " at " << gbs << " GB/s " << std::endl;
     fflush(stdout);
 
@@ -438,14 +444,10 @@ class BinaryIO {
 	  gsite[d] = lsite[d]+grid->_processor_coor[d]*grid->_ldimensions[d];
 	}
 	
-	/////////////////////////
-	// Get the rank of owner of data
-	/////////////////////////
 	int g_idx;
-	
 	grid->GlobalCoorToGlobalIndex(gsite,g_idx);
-	
-	fileObj = fbuf[g_idx];
+
+	fileObj = fbuf[g_idx - slice_offset];
 	t_bytes+=sizeof(fileObj);
 	
 	if(ieee32big) be32toh_v((void *)&fileObj,sizeof(fileObj));

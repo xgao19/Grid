@@ -385,127 +385,85 @@ class BinaryIO {
     int ieee64big = (format == std::string("IEEE64BIG"));
     int ieee64    = (format == std::string("IEEE64"));
 
+    // original code was very slow, 40MB/s reading of a file that should be read at 3GB/s on BNL-KNL
+    // the code below achieves 4GB/s for reading the file and overall 1GB/s for reading+munging
+    std::vector<fobj> fbuf;
 
-    // Take into account block size of parallel file systems want about
-    // 4-16MB chunks.
-    // Ideally one reader/writer per xy plane and read these contiguously
-    // with comms from nominated I/O nodes.
     std::ifstream fin;
 
     int nd = grid->_ndimension;
-    std::vector<int> parallel(nd,1);
-    std::vector<int> ioproc  (nd);
-    std::vector<int> start(nd);
-    std::vector<int> range(nd);
-
     for(int d=0;d<nd;d++){
       assert(grid->CheckerBoarded(d) == 0);
-    }
-
-    uint64_t slice_vol = 1;
-
-    int IOnode = 1;
-    for(int d=0;d<grid->_ndimension;d++) {
-
-      if ( d == 0 ) parallel[d] = 0;
-      if (parallel[d]) {
-	range[d] = grid->_ldimensions[d];
-	start[d] = grid->_processor_coor[d]*range[d];
-	ioproc[d]= grid->_processor_coor[d];
-      } else {
-	range[d] = grid->_gdimensions[d];
-	start[d] = 0;
-	ioproc[d]= 0;
-	
-	if ( grid->_processor_coor[d] != 0 ) IOnode = 0;
-      }
-      slice_vol = slice_vol * range[d];
-    }
-
-    {
-      uint32_t tmp = IOnode;
-      grid->GlobalSum(tmp);
-      std::cout<< std::dec ;
-      std::cout<< GridLogMessage<< "Parallel read I/O to "<< file << " with " <<tmp<< " IOnodes for subslice ";
-      for(int d=0;d<grid->_ndimension;d++){
-	std::cout<< range[d];
-	if( d< grid->_ndimension-1 ) 
-	  std::cout<< " x ";
-      }
-      std::cout << std::endl;
     }
 
     GridStopWatch timer; timer.Start();
     uint64_t bytes=0;
 
     int myrank = grid->ThisRank();
-    int iorank = grid->RankFromProcessorCoor(ioproc);
 
-    if ( IOnode ) { 
-      fin.open(file,std::ios::binary|std::ios::in);
-    }
+    fin.open(file,std::ios::binary|std::ios::in);
+    fin.seekg(0,std::ios_base::end);
+    assert((fin.tellg() - offset) % sizeof(fobj) == 0);
+    auto elems = (fin.tellg()-offset) / sizeof(fobj);
+    fin.seekg(offset);
+    fbuf.resize(elems);
+    GridStopWatch gsw; gsw.Start();
+    fin.read((char *)&fbuf[0],sizeof(fobj)*elems);assert( fin.fail()==0);
+    gsw.Stop();
+    RealD gbs = elems*sizeof(fobj) / 1073.741824 / gsw.useconds();
+    std::cout << "Node " << myrank << " reads " << elems << " objects from " << file << 
+      " at " << gbs << " GB/s " << std::endl;
+    fflush(stdout);
 
-    //////////////////////////////////////////////////////////
-    // Find the location of each site and send to primary node
-    // Take loop order from Chroma; defines loop order now that NERSC doc no longer
-    // available (how short sighted is that?)
-    //////////////////////////////////////////////////////////
+    // could also select one node for reading and then broadcast, does not seem to
+    // matter much in a filesystem that is mounted over the fabric
+
     Umu = zero;
-    static uint32_t csum; csum=0;
-    fobj fileObj;
-    static sobj siteObj; // Static to place in symmetric region for SHMEM
+    uint32_t csum = 0;
 
-      // need to implement these loops in Nd independent way with a lexico conversion
-    for(int tlex=0;tlex<slice_vol;tlex++){
-  
-      std::vector<int> tsite(nd); // temporary mixed up site
+#pragma omp parallel
+    {
+      uint32_t t_csum = 0; 
+      int64_t t_bytes = 0;
+      fobj fileObj;
+      sobj siteObj;
       std::vector<int> gsite(nd);
       std::vector<int> lsite(nd);
-      std::vector<int> iosite(nd);
 
-      Lexicographic::CoorFromIndex(tsite,tlex,range);
-
-      for(int d=0;d<nd;d++){
-	lsite[d] = tsite[d]%grid->_ldimensions[d];  // local site
-	gsite[d] = tsite[d]+start[d];               // global site
-      }
-
-      /////////////////////////
-      // Get the rank of owner of data
-      /////////////////////////
-      int rank, o_idx,i_idx, g_idx;
-      grid->GlobalCoorToRankIndex(rank,o_idx,i_idx,gsite);
-      grid->GlobalCoorToGlobalIndex(gsite,g_idx);
-      
-      ////////////////////////////////
-      // iorank reads from the seek
-      ////////////////////////////////
-      if (myrank == iorank) {
-  
-	fin.seekg(offset+g_idx*sizeof(fileObj));
-	fin.read((char *)&fileObj,sizeof(fileObj));assert( fin.fail()==0);
-	bytes+=sizeof(fileObj);
-  
+#pragma omp for
+      for(int tlex=0;tlex<grid->lSites();tlex++){
+	
+	Lexicographic::CoorFromIndex(lsite,tlex,grid->_ldimensions);
+	for(int d=0;d<nd;d++){
+	  gsite[d] = lsite[d]+grid->_processor_coor[d]*grid->_ldimensions[d];
+	}
+	
+	/////////////////////////
+	// Get the rank of owner of data
+	/////////////////////////
+	int g_idx;
+	
+	grid->GlobalCoorToGlobalIndex(gsite,g_idx);
+	
+	fileObj = fbuf[g_idx];
+	t_bytes+=sizeof(fileObj);
+	
 	if(ieee32big) be32toh_v((void *)&fileObj,sizeof(fileObj));
 	if(ieee32)    le32toh_v((void *)&fileObj,sizeof(fileObj));
 	if(ieee64big) be64toh_v((void *)&fileObj,sizeof(fileObj));
 	if(ieee64)    le64toh_v((void *)&fileObj,sizeof(fileObj));
 	
-	munge(fileObj,siteObj,csum);
+	munge(fileObj,siteObj,t_csum);
 	
-      } 
-      
-      // Possibly do transport through pt2pt 
-      if ( rank != iorank ) { 
-	if ( (myrank == rank) || (myrank==iorank) ) {
-	  grid->SendRecvPacket((void *)&siteObj,(void *)&siteObj,iorank,rank,sizeof(siteObj));
-	}
-      }
-      // Poke at destination
-      if ( myrank == rank ) {
 	pokeLocalSite(siteObj,Umu,lsite);
+
       }
-      grid->Barrier(); // necessary?
+
+#pragma omp critical
+      {
+	csum += t_csum; // checksum is linear
+	bytes += t_bytes;
+      }
     }
 
     grid->GlobalSum(csum);

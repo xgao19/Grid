@@ -50,7 +50,7 @@ void LAPACK_dstegr(char *jobz, char *range, int *n, double *d, double *e,
 #endif
 #include "DenseMatrix.h"
 #include "EigenSort.h"
-
+#include <zlib.h>
 // eliminate temorary vector in calc()
 
 namespace Grid {
@@ -430,6 +430,136 @@ class BlockedFieldVector {
     // TODO
   }
 
+
+  // zlib's crc32 gets 0.4 GB/s on KNL single thread
+  // below gets 4.8 GB/s
+  uint32_t crc32_threaded(unsigned char* data, int64_t len, uint32_t previousCrc32 = 0) {
+
+    std::vector<uint32_t> partials;
+    int64_t len_part;
+
+#pragma omp parallel shared(partials,len_part)
+    {
+      int threads = omp_get_num_threads();
+      int thread  = omp_get_thread_num();
+
+#pragma omp single
+      {
+	partials.resize(threads);
+	assert(len % threads == 0); // for now 64 divides all our data, easy to generalize
+	len_part = len / threads;
+      }
+
+#pragma omp barrier
+
+      partials[thread] = crc32(previousCrc32,data + len_part * thread,len_part);
+    }
+
+    uint32_t ret = crc32_combine(partials[0],partials[1],len_part);
+    for (int i=2;i<(int)partials.size();i++)
+      ret = crc32_combine(ret,partials[i],len_part);
+    return ret;
+      
+  }
+
+  void read_argonne(const char* dir, std::vector<int>& nodes) {
+    // this is slow code to read the argonne file format for debugging purposes
+    std::vector<int> slot_lvol, lvol;
+    int _nd = (int)nodes.size();
+    int i, ntotal = 1;
+    for (i=0;i<_nd;i++) {
+      slot_lvol.push_back(_bgrid._grid->FullDimensions()[i] / nodes[i]);
+      lvol.push_back(_bgrid._grid->FullDimensions()[i] / _bgrid._grid->_processors[i]);
+      ntotal *= nodes[i];
+    }
+
+    int nperdir = ntotal / 32;
+
+    std::cout << GridLogMessage << " Read " << dir << " nodes = " << nodes << std::endl;
+    std::cout << GridLogMessage << " lvol = " << lvol << std::endl;
+
+    std::map<int, std::vector<float> > slots;
+
+
+    // loop over local volume
+    std::vector<int> lcoor, gcoor, pcoor, scoor, slcoor;
+    lcoor.resize(_nd); gcoor.resize(_nd); pcoor.resize(_nd); scoor.resize(_nd);
+    slcoor.resize(_nd);
+
+    _bgrid._grid->ProcessorCoorFromRank(_bgrid._grid->ThisRank(),pcoor);
+    
+    for (lcoor[0] = 0; lcoor[0] < lvol[0]; lcoor[0]++) {
+      for (lcoor[1] = 0; lcoor[1] < lvol[1]; lcoor[1]++) {
+	for (lcoor[2] = 0; lcoor[2] < lvol[2]; lcoor[2]++) {
+	  for (lcoor[3] = 0; lcoor[3] < lvol[3]; lcoor[3]++) {
+	    for (lcoor[4] = 0; lcoor[4] < lvol[4]; lcoor[4]++) {
+	      for (int i=0;i<_nd;i++) {
+		gcoor[i] = lcoor[i] + pcoor[i]*lvol[i]; // this is somewhat wrong?
+		scoor[i] = gcoor[i] / slot_lvol[i];
+		slcoor[i] = gcoor[i] - scoor[i]*slot_lvol[i];
+	      }
+	      int slot;
+	      Lexicographic::IndexFromCoor(scoor,slot,nodes);
+
+	      // make sure slot is loaded
+	      auto sl = slots.find(slot);
+	      if (sl == slots.end()) {
+		// load slot
+		slots[slot] = std::vector<float>();
+		std::vector<float>&rdata = slots[slot];
+
+		char buf[4096];
+		sprintf(buf,"%s/%2.2d/%10.10d",dir,slot/nperdir,slot);
+		FILE* f = fopen(buf,"rb");
+		assert(f);
+
+		fseeko(f,0,SEEK_END);
+		int64_t size = ftello(f);
+
+		rdata.resize(size / 4);
+
+		fseeko(f,0,SEEK_SET);
+
+		GridStopWatch gsw;
+		gsw.Start();
+		assert(fread(&rdata[0],size,1,f) == 1);
+		gsw.Stop();
+
+		fclose(f);
+
+		GridStopWatch gsw2;
+		gsw2.Start();
+		uint32_t crc = crc32_threaded((unsigned char*)&rdata[0],size);
+		gsw2.Stop();
+
+		sprintf(buf,"%s/checksums.txt",dir);
+		f = fopen(buf,"rt");
+		assert(f);
+		for (int l=0;l<3+slot;l++)
+		  fgets(buf,sizeof(buf),f);
+		uint32_t crc_exp = strtol(buf, NULL, 16);
+		fclose(f);
+
+		std::cout << GridLogMessage << "Loading slot " << slot <<
+		  " in " << gsw.Elapsed() << " at " 
+			  << ( (double)size / 1024./1024./1024. / gsw.useconds()*1000.*1000. )
+			  << " GB/s " << " crc32 = " << std::hex << crc << " crc32_expected = " << std::hex << crc_exp
+		          << " computed at "
+			  << ( (double)size / 1024./1024./1024. / gsw2.useconds()*1000.*1000. )
+            		  << " GB/s "
+			  << std::endl;		
+
+		assert(crc == crc_exp);
+	      }
+	    }
+	  }
+	}
+      }
+    }
+
+    _bgrid._grid->Barrier();
+    std::cout << GridLogMessage  << "Loading complete" << std::endl;
+  }
 };
 
 /////////////////////////////////////////////////////////////
@@ -1078,6 +1208,11 @@ until convergence
 	    for(int j = 0; j<Nk; ++j){
 	      B=evec.get(j);
 	      B.checkerboard = evec.get(0).checkerboard;
+
+	      /*{
+		auto res = B._odata[0];
+		std::cout << GridLogMessage << " ev = " << res << std::endl;
+		}*/
 	      _Linop.HermOp(B,v);
 	      
 	      RealD vnum = real(innerProduct(B,v)); // HermOp.

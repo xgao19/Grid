@@ -199,6 +199,7 @@ class BlockedFieldVector {
 
   typedef typename Field::scalar_type Coeff_t;
   typedef typename Field::vector_object vobj;
+  typedef typename vobj::scalar_object sobj;
 
   BlockedGrid<Coeff_t,Field> _bgrid;
   
@@ -435,6 +436,9 @@ class BlockedFieldVector {
   // below gets 4.8 GB/s
   uint32_t crc32_threaded(unsigned char* data, int64_t len, uint32_t previousCrc32 = 0) {
 
+    return crc32(previousCrc32,data,len);
+
+    /*
     std::vector<uint32_t> partials;
     int64_t len_part;
 
@@ -459,7 +463,18 @@ class BlockedFieldVector {
     for (int i=2;i<(int)partials.size();i++)
       ret = crc32_combine(ret,partials[i],len_part);
     return ret;
+    */
       
+  }
+
+  int get_bfm_index( int* pos, int co, int* s ) {
+    
+    int ls = s[0];
+    int NtHalf = s[4] / 2;
+    int simd_coor = pos[4] / NtHalf;
+    int regu_coor = (pos[1] + s[1] * (pos[2] + s[2] * ( pos[3] + s[3] * (pos[4] % NtHalf) ) )) / 2;
+     
+    return regu_coor * ls * 48 + pos[0] * 48 + co * 4 + simd_coor * 2;
   }
 
   void read_argonne(const char* dir, std::vector<int>& nodes) {
@@ -468,10 +483,12 @@ class BlockedFieldVector {
     int _nd = (int)nodes.size();
     int i, ntotal = 1;
     int64_t lsites = 1;
+    int64_t slot_lsites = 1;
     for (i=0;i<_nd;i++) {
       slot_lvol.push_back(_bgrid._grid->FullDimensions()[i] / nodes[i]);
       lvol.push_back(_bgrid._grid->FullDimensions()[i] / _bgrid._grid->_processors[i]);
       lsites *= lvol.back();
+      slot_lsites *= slot_lvol.back();
       ntotal *= nodes[i];
     }
 
@@ -480,90 +497,128 @@ class BlockedFieldVector {
     std::cout << GridLogMessage << " Read " << dir << " nodes = " << nodes << std::endl;
     std::cout << GridLogMessage << " lvol = " << lvol << std::endl;
 
-    std::map<int, std::vector<float> > slots;
+    std::map<int, std::vector<int> > slots;
 
 
-    // loop over local volume
-    std::vector<int> lcoor, gcoor, pcoor, scoor, slcoor;
-    lcoor.resize(_nd); gcoor.resize(_nd); pcoor.resize(_nd); scoor.resize(_nd);
-    slcoor.resize(_nd);
-
-    _bgrid._grid->ProcessorCoorFromRank(_bgrid._grid->ThisRank(),pcoor);
-
-    for (int lidx = 0; lidx < lsites; lidx++) {
-      Lexicographic::CoorFromIndex(lcoor,lidx,lvol);
-      for (int i=0;i<_nd;i++) {
-	gcoor[i] = lcoor[i] + pcoor[i]*lvol[i]; // this is somewhat wrong?
-	scoor[i] = gcoor[i] / slot_lvol[i];
-	slcoor[i] = gcoor[i] - scoor[i]*slot_lvol[i];
-      }
-      int slot;
-      Lexicographic::IndexFromCoor(scoor,slot,nodes);
+    {
+      std::vector<int> lcoor, gcoor, scoor;
+      lcoor.resize(_nd); gcoor.resize(_nd);  scoor.resize(_nd);
       
-      // make sure slot is loaded
-      auto sl = slots.find(slot);
-      if (sl == slots.end()) {
-	// load slot
-	slots[slot] = std::vector<float>();
-	std::vector<float>&rdata = slots[slot];
-	
-	char buf[4096];
-	sprintf(buf,"%s/%2.2d/%10.10d",dir,slot/nperdir,slot);
-	FILE* f = fopen(buf,"rb");
-	assert(f);
-	
-	fseeko(f,0,SEEK_END);
-	int64_t size = ftello(f);
-	
-	rdata.resize(size / 4);
-	
-	fseeko(f,0,SEEK_SET);
-	
-	GridStopWatch gsw;
+      // first create mapping of indices to slots
+      for (int lidx = 0; lidx < lsites; lidx++) {
+	Lexicographic::CoorFromIndex(lcoor,lidx,lvol);
+	for (int i=0;i<_nd;i++) {
+	  gcoor[i] = lcoor[i] + _bgrid._grid->_processor_coor[i]*lvol[i];
+	  scoor[i] = gcoor[i] / slot_lvol[i];
+	}
+	int slot;
+	Lexicographic::IndexFromCoor(scoor,slot,nodes);
+	auto sl = slots.find(slot);
+	if (sl == slots.end())
+	  slots[slot] = std::vector<int>();
+	slots[slot].push_back(lidx);
+      }
+    }
+
+    // now load one slot at a time and fill the vector
+    for (auto sl=slots.begin();sl!=slots.end();sl++) {
+      std::vector<int>& idx = sl->second;
+      int slot = sl->first;
+      std::vector<float> rdata;
+
+      char buf[4096];
+
+      sprintf(buf,"%s/checksums.txt",dir);
+      FILE* f = fopen(buf,"rt");
+      assert(f);
+      for (int l=0;l<3+slot;l++)
+	fgets(buf,sizeof(buf),f);
+      uint32_t crc_exp = strtol(buf, NULL, 16);
+      fclose(f);
+
+      // load one slot vector
+      sprintf(buf,"%s/%2.2d/%10.10d",dir,slot/nperdir,slot);
+      f = fopen(buf,"rb");
+      assert(f);
+      
+      fseeko(f,0,SEEK_END);
+      off_t total_size = ftello(f);
+      fseeko(f,0,SEEK_SET);
+
+      int64_t size = slot_lsites / 2 * 24 * 4;
+      rdata.resize(size);
+
+      assert(total_size % size == 0);
+
+      _Nfull = total_size / size;
+      _v.resize(_Nfull,_v[0]);
+      
+      uint32_t crc = 0x0;
+      GridStopWatch gsw,gsw2;
+      for (int nev = 0;nev < _Nfull;nev++) {
+     
 	gsw.Start();
 	assert(fread(&rdata[0],size,1,f) == 1);
 	gsw.Stop();
 	
-	fclose(f);
-	
-	GridStopWatch gsw2;
 	gsw2.Start();
-	uint32_t crc = crc32_threaded((unsigned char*)&rdata[0],size);
+	crc = crc32_threaded((unsigned char*)&rdata[0],size,crc);
 	gsw2.Stop();
+      
+	for (int i=0;i<size/4;i++) {
+	  char* c = (char*)&rdata[i];
+	  char tmp; int j;
+	  for (j=0;j<2;j++) {
+	    tmp = c[j]; c[j] = c[3-j]; c[3-j] = tmp;
+	  }
+	}
 	
-	sprintf(buf,"%s/checksums.txt",dir);
-	f = fopen(buf,"rt");
-	assert(f);
-	for (int l=0;l<3+slot;l++)
-	  fgets(buf,sizeof(buf),f);
-	uint32_t crc_exp = strtol(buf, NULL, 16);
-	fclose(f);
-	
-	std::cout << GridLogMessage << "Loading slot " << slot <<
-	  " in " << gsw.Elapsed() << " at " 
-		  << ( (double)size / 1024./1024./1024. / gsw.useconds()*1000.*1000. )
-		  << " GB/s " << " crc32 = " << std::hex << crc << " crc32_expected = " << std::hex << crc_exp
-		  << " computed at "
-		  << ( (double)size / 1024./1024./1024. / gsw2.useconds()*1000.*1000. )
-		  << " GB/s "
-		  << std::endl;		
-	
-	assert(crc == crc_exp);
-      }
-    }
-
-    // and now another parallel one to poke the data
-    /*
+	// loop
+	_v[nev].checkerboard = Odd;
+#pragma omp parallel 
+	{
+	  
+	  std::vector<int> lcoor, gcoor, scoor, slcoor;
+	  lcoor.resize(_nd); gcoor.resize(_nd); 
+	  slcoor.resize(_nd); scoor.resize(_nd);
+	  
+#pragma omp for
+	  for (int64_t lidx = 0; lidx < idx.size(); lidx++) {
+	    int llidx = idx[lidx];
+	    Lexicographic::CoorFromIndex(lcoor,llidx,lvol);
+	    for (int i=0;i<_nd;i++) {
+	      gcoor[i] = lcoor[i] + _bgrid._grid->_processor_coor[i]*lvol[i];
+	      scoor[i] = gcoor[i] / slot_lvol[i];
+	      slcoor[i] = gcoor[i] - scoor[i]*slot_lvol[i];
+	    }
+	    
+	    if ((lcoor[1]+lcoor[2]+lcoor[3]+lcoor[4]) % 2 == 1) {
 	      // poke 
-	      SpinColourVector sc;
+	      sobj sc;
 	      for (int s=0;s<4;s++)
 		for (int c=0;c<3;c++)
-		  sc()(s)(c) = std::complex<double>( 1.0, 1.0 );
+		  sc()(s)(c) = *(std::complex<float>*)&rdata[get_bfm_index(&slcoor[0],c+s*3, &slot_lvol[0] )];
 	      
-	      pokeLocalSite(sc,src,coor);
+	      pokeLocalSite(sc,_v[nev],lcoor);
+	    }
+	    
+	  }
+	}
+      }
 
-
-    */
+      fclose(f);      
+      std::cout << GridLogMessage << "Loading slot " << slot << " with " << idx.size() << " points and " 
+		<< _Nfull << " vectors in "
+		<< gsw.Elapsed() << " at " 
+		<< ( (double)size * _Nfull / 1024./1024./1024. / gsw.useconds()*1000.*1000. )
+		<< " GB/s " << " crc32 = " << std::hex << crc << " crc32_expected = " << crc_exp << std::dec
+		<< " computed at "
+		<< ( (double)size * _Nfull / 1024./1024./1024. / gsw2.useconds()*1000.*1000. )
+		<< " GB/s "
+		<< std::endl;
+      
+      assert(crc == crc_exp);
+    }
 
     _bgrid._grid->Barrier();
     std::cout << GridLogMessage  << "Loading complete" << std::endl;

@@ -55,7 +55,7 @@ void LAPACK_dstegr(char *jobz, char *range, int *n, double *d, double *e,
 
 namespace Grid {
 
-template<typename Coeff_t,typename Field>
+template<typename vCoeff_t,typename Field>
 class BlockedGrid {
 public:
   GridBase* _grid;
@@ -64,24 +64,25 @@ public:
   std::vector<int> _nb; // number of blocks
   std::vector<int> _l;  // local dimensions irrespective of cb
   std::vector<int> _l_cb;  // local dimensions of checkerboarded vector
+  std::vector<int> _l_cb_o;  // local dimensions of inner checkerboarded vector
   std::vector<int> _bs_cb; // block size in checkerboarded vector
-  std::vector<int> _l_cb_o;  // local dimensions in terms of cb and simd o-sites
-  std::vector<int> _bs_cb_o; // block size in terms of cb and simd o-sites
+  std::vector<int> _nb_o; // number of blocks of simd o-sites
 
-  int _nd, _blocks, _cf_size, _cf_block_size, _o_sites, _o_block_sites;
+  int _nd, _blocks, _cf_size, _cf_block_size, _o_blocks, _block_sites;
   
   BlockedGrid(GridBase* grid, const std::vector<int>& block_size) :
     _grid(grid), _bs(block_size), _nd((int)_bs.size()), 
-      _nb(block_size), _l(block_size), _bs_cb_o(block_size),
+      _nb(block_size), _l(block_size), _l_cb(block_size), _nb_o(block_size),
       _l_cb_o(block_size), _bs_cb(block_size) {
 
     _blocks = 1;
+    _o_blocks = 1;
     _l = grid->FullDimensions();
     _l_cb = grid->LocalDimensions();
+    _l_cb_o = grid->_rdimensions;
 
     _cf_size = 1;
-    _o_sites = 1;
-
+    _block_sites = 1;
     for (int i=0;i<_nd;i++) {
       _l[i] /= grid->_processors[i];
 
@@ -90,18 +91,17 @@ public:
       int r = _l[i] / _l_cb[i];
       assert(!(_bs[i] % r)); // checkerboarding must accommodate choice of blocksize
       _bs_cb[i] = _bs[i] / r;
-      _l_cb_o[i] = _l_cb[i] / _grid->_simd_layout[i]; // this is already guaranteed to divide
-      _o_sites *= _l_cb_o[i];
-      assert(!(_bs_cb[i] % _grid->_simd_layout[i])); // simd must accommodate choice of blocksize
-      _bs_cb_o[i] = _bs_cb[i] / _grid->_simd_layout[i];
+      _block_sites *= _bs_cb[i];
+      assert(!(_nb[i] % _grid->_simd_layout[i])); // simd must accommodate choice of blocksize
       _nb[i] = _l[i] / _bs[i];
+      _nb_o[i] = _nb[i] / _grid->_simd_layout[i];
       _blocks *= _nb[i];
+      _o_blocks *= _nb_o[i];
       _cf_size *= _l[i];
     }
 
     _cf_size *= 12 / 2;
     _cf_block_size = _cf_size / _blocks;
-    _o_block_sites = _o_sites / _blocks;
 
     std::cout << GridLogMessage << "BlockedGrid:" << std::endl;
     std::cout << GridLogMessage << " _l     = " << _l << std::endl;
@@ -109,14 +109,15 @@ public:
     std::cout << GridLogMessage << " _l_cb_o     = " << _l_cb_o << std::endl;
     std::cout << GridLogMessage << " _bs    = " << _bs << std::endl;
     std::cout << GridLogMessage << " _bs_cb    = " << _bs_cb << std::endl;
-    std::cout << GridLogMessage << " _bs_cb_o    = " << _bs_cb_o << std::endl;
+
     std::cout << GridLogMessage << " _nb    = " << _nb << std::endl;
+    std::cout << GridLogMessage << " _nb_o    = " << _nb_o << std::endl;
     std::cout << GridLogMessage << " _blocks = " << _blocks << std::endl;
-    std::cout << GridLogMessage << " sizeof(Coeff_t) = " << sizeof(Coeff_t) << std::endl;
+    std::cout << GridLogMessage << " _o_blocks = " << _o_blocks << std::endl;
+    std::cout << GridLogMessage << " sizeof(vCoeff_t) = " << sizeof(vCoeff_t) << std::endl;
     std::cout << GridLogMessage << " _cf_size = " << _cf_size << std::endl;
     std::cout << GridLogMessage << " _cf_block_size = " << _cf_block_size << std::endl;
-    std::cout << GridLogMessage << " _o_sites = " << _o_sites << std::endl;
-    std::cout << GridLogMessage << " _o_block_sites = " << _o_block_sites << std::endl;
+    std::cout << GridLogMessage << " _block_sites = " << _block_sites << std::endl;
     std::cout << GridLogMessage << " _grid->oSites() = " << _grid->oSites() << std::endl;
 
     //    _grid->Barrier();
@@ -128,65 +129,105 @@ public:
       std::vector<int> bcoor;
       bcoor.resize(_nd);
       x0.resize(_nd);
-      Lexicographic::CoorFromIndex(bcoor,b,_nb);
+      assert(b < _o_blocks);
+      Lexicographic::CoorFromIndex(bcoor,b,_nb_o);
       int i;
 
       for (i=0;i<_nd;i++) {
-	x0[i] = bcoor[i]*_bs_cb_o[i];
+	x0[i] = bcoor[i]*_bs_cb[i];
       }
 
-      //std::cout << GridLogMessage << "Map block b -> " << x0 << " -- " << x1 << std::endl;
+      //std::cout << GridLogMessage << "Map block b -> " << x0 << std::endl;
 
     }
 
     int block_site_to_o_site(const std::vector<int>& x0, int i) {
       std::vector<int> coor;  coor.resize(_nd);
-      Lexicographic::CoorFromIndex(coor,i,_bs_cb_o);
+      Lexicographic::CoorFromIndex(coor,i,_bs_cb);
       for (int j=0;j<_nd;j++)
 	coor[j] += x0[j];
+      //std::cout << GridLogMessage << "Coor: " << coor << std::endl;
+      
       Lexicographic::IndexFromCoor(coor,i,_l_cb_o);
+      
+      //std::cout << GridLogMessage << "IDX: " << i << std::endl;
       return i;
     }
 
-    ComplexD block_sp(int b, const Field& x, const Field& y) {
+    vCoeff_t block_sp(int b, const Field& x, const Field& y) {
 
       std::vector<int> x0;
       block_to_coor(b,x0);
 
       //std::cout << GridLogMessage << "Coor x0 = " << x0 << std::endl;
       
-      ComplexD ret = 0.0;
+      vCoeff_t ret = 0.0;
 
-      for (int i=0;i<_o_block_sites;i++) { // only odd sites
+      for (int i=0;i<_block_sites;i++) { // only odd sites
 	int ss = block_site_to_o_site(x0,i);
 	//std::cout << GridLogMessage << i << "/" << _o_block_sites << " -> " << ss << std::endl;
-	ret += Reduce(TensorRemove(innerProduct(x._odata[ss],y._odata[ss])));
+	ret += TensorRemove(innerProduct(x._odata[ss],y._odata[ss]));
+
+	//for (int s=0;s<4;s++)
+	//  for (int c=0;c<3;c++)
+	//    std::cout << GridLogMessage << i << "|" << ss << " x[" << 
+	//      "] = " << x._odata[ss]._internal(0)(0) 
+	//		      << std::endl;
       }
       return ret;
     }
 
-    void block_caxpy(int b, Field& ret, const Coeff_t& a, const Field& x, const Field& y) {
+    template<class T>
+    void vcaxpy(iScalar<T>& r,const vCoeff_t& a,const iScalar<T>& x,const iScalar<T>& y) {
+      vcaxpy(r._internal,a,x._internal,y._internal);
+    }
+
+    template<class T,int N>
+    void vcaxpy(iVector<T,N>& r,const vCoeff_t& a,const iVector<T,N>& x,const iVector<T,N>& y) {
+      for (int i=0;i<N;i++)
+	vcaxpy(r._internal[i],a,x._internal[i],y._internal[i]);
+    }
+
+    void vcaxpy(vCoeff_t& r,const vCoeff_t& a,const vCoeff_t& x,const vCoeff_t& y) {
+      r = a*x + y;
+    }
+
+    void block_caxpy(int b, Field& ret, const vCoeff_t& a, const Field& x, const Field& y) {
 
       std::vector<int> x0;
       block_to_coor(b,x0);
       
-      for (int i=0;i<_o_block_sites;i++) { // only odd sites
+      for (int i=0;i<_block_sites;i++) { // only odd sites
 	int ss = block_site_to_o_site(x0,i);
-	ret._odata[ss] = a*x._odata[ss] + y._odata[ss];
+	vcaxpy(ret._odata[ss],a,x._odata[ss],y._odata[ss]);
       }
 
     }
 
-    void block_cscale(int b, const Coeff_t& a, Field& ret) {
+    template<class T>
+    void vcscale(iScalar<T>& r,const vCoeff_t& a,const iScalar<T>& x) {
+      vcscale(r._internal,a,x._internal);
+    }
+
+    template<class T,int N>
+    void vcscale(iVector<T,N>& r,const vCoeff_t& a,const iVector<T,N>& x) {
+      for (int i=0;i<N;i++)
+	vcscale(r._internal[i],a,x._internal[i]);
+    }
+
+    void vcscale(vCoeff_t& r,const vCoeff_t& a,const vCoeff_t& x) {
+      r = a*x;
+    }
+
+    void block_cscale(int b, const vCoeff_t& a, Field& ret) {
 
       std::vector<int> x0;
       block_to_coor(b,x0);
       
-      for (int i=0;i<_o_block_sites;i++) { // only odd sites
+      for (int i=0;i<_block_sites;i++) { // only odd sites
 	int ss = block_site_to_o_site(x0,i);
-	ret._odata[ss] = a * ret._odata[ss];
+	vcscale(ret._odata[ss],a,ret._odata[ss]);
       }
-
     }
 
 };
@@ -198,13 +239,14 @@ class BlockedFieldVector {
     _Nfull; // number of vectors kept in full precision
 
   typedef typename Field::scalar_type Coeff_t;
+  typedef typename Field::vector_type vCoeff_t;
   typedef typename Field::vector_object vobj;
   typedef typename vobj::scalar_object sobj;
 
-  BlockedGrid<Coeff_t,Field> _bgrid;
+  BlockedGrid<vCoeff_t,Field> _bgrid;
   
   std::vector<Field> _v; // _Nfull vectors
-  std::vector< Coeff_t > _c;
+  std::vector< vCoeff_t > _c; 
 
   bool _full_locked;
   
@@ -213,7 +255,7 @@ class BlockedFieldVector {
   BlockedFieldVector(int Nm,GridBase* value,int Nfull,const std::vector<int>& block_size) : 
   _Nfull(Nfull), _Nm(Nm), _v(Nfull,value), _bgrid(value,block_size), _full_locked(false) {
 
-    _c.resize(_Nm*_Nfull*_bgrid._blocks);
+    _c.resize(_Nm*_Nfull*_bgrid._o_blocks);
 #pragma omp parallel for
     for (int64_t i=0;i<_c.size();i++)
       _c[i] = 0.0;
@@ -231,8 +273,8 @@ class BlockedFieldVector {
   
   }
 
-#define cidx(i,b,j) ((int64_t)b + (int64_t)_bgrid._blocks * (int64_t)(j + _Nfull*i))
-  void set_coef(int i, int b, int j, const Coeff_t& v) {
+#define cidx(i,b,j) ((int64_t)b + (int64_t)_bgrid._o_blocks * (int64_t)(j + _Nfull*i))
+  void set_coef(int i, int b, int j, const vCoeff_t& v) {
     _c[ cidx(i,b,j) ] = v;
   }
 
@@ -245,16 +287,17 @@ class BlockedFieldVector {
     sw.Start();
     // orthogonalize local blocks and create coefficients for first Nfull vectors
 #pragma omp parallel for
-    for (int b=0;b<_bgrid._blocks;b++) {
+    for (int b=0;b<_bgrid._o_blocks;b++) {
       for (int i=0;i<_Nfull;i++) {
 	// |i> -= <j|i> |j>
 	for (int j=0;j<i;j++) {
-	  Coeff_t v = (Coeff_t)_bgrid.block_sp(b,_v[j],_v[i]);
+	  
+	  vCoeff_t v = _bgrid.block_sp(b,_v[j],_v[i]);
 	  set_coef(i,b,j,v);
 	  _bgrid.block_caxpy(b,_v[i],-v,_v[j],_v[i]);
 	}
 
-	Coeff_t nrm = (Coeff_t)_bgrid.block_sp(b,_v[i],_v[i]);
+	vCoeff_t nrm = _bgrid.block_sp(b,_v[i],_v[i]);
 	set_coef(i,b,i,sqrt(nrm));
 	
 	_bgrid.block_cscale(b,1.0 / sqrt(nrm),_v[i]);
@@ -266,7 +309,7 @@ class BlockedFieldVector {
 #if 0
     // test blocked sp
     Coeff_t sm = 0.0;
-    for (int b=0;b<_bgrid._blocks;b++) {
+    for (int b=0;b<_bgrid._o_blocks;b++) {
       sm += (Coeff_t)_bgrid.block_sp(b,_v[_Nfull-1],_v[_Nfull-1]);
     }
     _bgrid._grid->GlobalSum(sm);
@@ -275,7 +318,7 @@ class BlockedFieldVector {
 
     // test basis
     for (int j=0;j<_Nfull;j++) {
-      for (int b=0;b<_bgrid._blocks;b++) {
+      for (int b=0;b<_bgrid._o_blocks;b++) {
 	auto nrm2 = _bgrid.block_sp(b,_v[j],_v[j]);
 	std::cout << GridLogMessage << "TEST b = " << b << " j = " << j
 		  << " nrm2(_v) = " << nrm2 
@@ -297,7 +340,7 @@ class BlockedFieldVector {
     ret.checkerboard = _v[0].checkerboard;
 
 #pragma omp parallel for
-    for (int b=0;b<_bgrid._blocks;b++) {
+    for (int b=0;b<_bgrid._o_blocks;b++) {
       for (int j=0;j<_Nfull;j++)
 	_bgrid.block_caxpy(b,ret,_c[ cidx(i,b,j) ],_v[j],ret);
     }
@@ -308,17 +351,18 @@ class BlockedFieldVector {
   void put_blocked(int i, const Field& rhs) {
 
 #pragma omp parallel for
-    for (int b=0;b<_bgrid._blocks;b++) {
+    for (int b=0;b<_bgrid._o_blocks;b++) {
       for (int j=0;j<_Nfull;j++) {
 	// |rhs> -= <j|rhs> |j>
-	Coeff_t v = (Coeff_t)_bgrid.block_sp(b,_v[j],rhs);
+	
+	vCoeff_t v = _bgrid.block_sp(b,_v[j],rhs);
 	set_coef(i,b,j,v);
       }
     }
 
 #if 0
     std::cout << GridLogMessage << "------------------" << std::endl;
-    for (int b=0;b<_bgrid._blocks;b++) {
+    for (int b=0;b<_bgrid._o_blocks;b++) {
       for (int j=0;j<_Nfull;j++) {
     std::cout << GridLogMessage << " c[" << i << ", " << b << ", " << j << "] = " << _c[ cidx(i,b,j) ] << std::endl;
   }
@@ -398,14 +442,14 @@ class BlockedFieldVector {
       // -> _c[ j, bl ] = Q_jk _c[ k, bl ]
 #pragma omp parallel
       {
-        std::vector<Coeff_t> c0;
+        std::vector<vCoeff_t> c0;
 	c0.resize(_Nfull*_Nm);
 
 #pragma omp for
-        for (int b=0;b<_bgrid._blocks;b++) {
+        for (int b=0;b<_bgrid._o_blocks;b++) {
           for (int l=0;l<_Nfull;l++) {
 	    for(int j=j0; j<j1; ++j){
-	      Coeff_t& cc = c0[l + _Nfull*j];
+	      vCoeff_t& cc = c0[l + _Nfull*j];
 	      cc = 0.0;
 	      for(int k=k0; k<k1; ++k){
 		cc +=Qt[k+_Nm*j] * _c[ cidx(k,b,l) ];
@@ -438,11 +482,12 @@ class BlockedFieldVector {
 
     return crc32(previousCrc32,data,len);
 
-    /*
+    // below needs further tuning/testing
     std::vector<uint32_t> partials;
+    std::vector<int64_t> lens;
     int64_t len_part;
 
-#pragma omp parallel shared(partials,len_part)
+#pragma omp parallel shared(partials,lens,len_part)
     {
       int threads = omp_get_num_threads();
       int thread  = omp_get_thread_num();
@@ -450,21 +495,61 @@ class BlockedFieldVector {
 #pragma omp single
       {
 	partials.resize(threads);
+	lens.resize(threads);
 	assert(len % threads == 0); // for now 64 divides all our data, easy to generalize
 	len_part = len / threads;
       }
 
 #pragma omp barrier
 
-      partials[thread] = crc32(previousCrc32,data + len_part * thread,len_part);
+      partials[thread] = crc32(thread == 0 ? previousCrc32 : 0x0,data + len_part * thread,len_part);
+      lens[thread] = len_part;
+
+      // reduction
+      while (lens.size() > 1) {
+
+	uint32_t com_val;
+	int64_t com_len;
+	if (thread % 2 == 0) {
+	  if (thread + 1 < (int)partials.size()) {
+	    com_val = crc32_combine(partials[thread],partials[thread+1],lens[thread+1]);
+	    com_len = lens[thread] + lens[thread+1];
+	  } else if (thread + 1 == (int)partials.size()) {
+	    com_val = partials[thread];
+	    com_len = lens[thread];
+	  } else {
+	    com_len = -1; // inactive thread
+	  }
+	} else {
+	  com_len = -1;
+	}
+
+	//std::cout << "Reducing in thread " << thread << " from lens.size() = " << lens.size() << " found " << com_len << std::endl;
+	
+#pragma omp barrier
+
+#pragma omp single
+	{
+	  partials.resize(0);
+	  lens.resize(0);
+	}
+
+#pragma omp barrier
+	
+#pragma omp critical
+	{
+	  if (com_len != -1) {
+	    partials.push_back(com_val);
+	    lens.push_back(com_len);
+	  }
+	}
+
+#pragma omp barrier
+      }	
+
     }
 
-    uint32_t ret = crc32_combine(partials[0],partials[1],len_part);
-    for (int i=2;i<(int)partials.size();i++)
-      ret = crc32_combine(ret,partials[i],len_part);
-    return ret;
-    */
-      
+    return partials[0];
   }
 
   int get_bfm_index( int* pos, int co, int* s ) {

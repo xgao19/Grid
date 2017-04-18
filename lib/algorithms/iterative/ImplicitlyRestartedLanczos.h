@@ -55,6 +55,7 @@ void LAPACK_dstegr(char *jobz, char *range, int *n, double *d, double *e,
 
 namespace Grid {
 
+
 template<typename vCoeff_t,typename Field>
 class BlockedGrid {
 public:
@@ -92,9 +93,9 @@ public:
       assert(!(_bs[i] % r)); // checkerboarding must accommodate choice of blocksize
       _bs_cb[i] = _bs[i] / r;
       _block_sites *= _bs_cb[i];
-      assert(!(_nb[i] % _grid->_simd_layout[i])); // simd must accommodate choice of blocksize
       _nb[i] = _l[i] / _bs[i];
       _nb_o[i] = _nb[i] / _grid->_simd_layout[i];
+      assert(!(_nb[i] % _grid->_simd_layout[i])); // simd must accommodate choice of blocksize
       _blocks *= _nb[i];
       _o_blocks *= _nb_o[i];
       _cf_size *= _l[i];
@@ -308,12 +309,12 @@ class BlockedFieldVector {
 
 #if 0
     // test blocked sp
-    Coeff_t sm = 0.0;
+    vCoeff_t sm = 0.0;
     for (int b=0;b<_bgrid._o_blocks;b++) {
-      sm += (Coeff_t)_bgrid.block_sp(b,_v[_Nfull-1],_v[_Nfull-1]);
+      sm += _bgrid.block_sp(b,_v[_Nfull-1],_v[_Nfull-1]);
     }
     _bgrid._grid->GlobalSum(sm);
-    Coeff_t tot = (Coeff_t)innerProduct(_v[_Nfull-1],_v[_Nfull-1]);
+    vCoeff_t tot = innerProduct(_v[_Nfull-1],_v[_Nfull-1]);
     std::cout << GridLogMessage << " sm = " << sm << " tot = " << tot << std::endl;
 
     // test basis
@@ -411,7 +412,7 @@ class BlockedFieldVector {
     }
   }
 
-  void rotate(DenseVector<RealD>& Qt,int j0, int j1, int k0,int k1) {
+  void rotate(DenseVector<RealD>& Qt,int j0, int j1, int k0,int k1,int evec_offset) {
     GridBase* grid = _v[0]._grid;
     
     if (!_full_locked) {
@@ -426,11 +427,11 @@ class BlockedFieldVector {
 	  
 	  for(int j=j0; j<j1; ++j){
 	    for(int k=k0; k<k1; ++k){
-	      B[j] +=Qt[k+_Nm*j] * _v[k]._odata[ss];
+	      B[j] +=Qt[k+_Nm*j] * _v[k + evec_offset]._odata[ss];
 	    }
 	  }
 	  for(int j=j0; j<j1; ++j){
-	    _v[j]._odata[ss] = B[j];
+	    _v[j + evec_offset]._odata[ss] = B[j];
 	  }
 	}
       }
@@ -452,13 +453,13 @@ class BlockedFieldVector {
 	      vCoeff_t& cc = c0[l + _Nfull*j];
 	      cc = 0.0;
 	      for(int k=k0; k<k1; ++k){
-		cc +=Qt[k+_Nm*j] * _c[ cidx(k,b,l) ];
+		cc +=Qt[k+_Nm*j] * _c[ cidx((k+evec_offset),b,l) ];
 	      }
 	    }
           }
 	  for (int l=0;l<_Nfull;l++) {
 	    for(int j=j0; j<j1; ++j){
-	      _c[ cidx(j,b,l) ] = c0[l + _Nfull*j];
+	      _c[ cidx((j+evec_offset),b,l) ] = c0[l + _Nfull*j];
 	    }
 	  }
 	}
@@ -471,8 +472,16 @@ class BlockedFieldVector {
     return _Nm;
   }
 
-  void sort(DenseVector<RealD>& sort_vals, int Nsort) {
-    // TODO
+  std::vector<int> getIndex(DenseVector<RealD>& sort_vals) {
+
+    std::vector<int> idx(sort_vals.size());
+    iota(idx.begin(), idx.end(), 0);
+
+    // sort indexes based on comparing values in v
+    sort(idx.begin(), idx.end(),
+	 [&sort_vals](int i1, int i2) {return sort_vals[i1] < sort_vals[i2];});
+
+    return idx;
   }
 
 
@@ -562,8 +571,10 @@ class BlockedFieldVector {
     return regu_coor * ls * 48 + pos[0] * 48 + co * 4 + simd_coor * 2;
   }
 
-  void read_argonne(const char* dir, std::vector<int>& nodes) {
+  void read_argonne(const char* dir, const std::vector<int>& cnodes) {
+
     // this is slow code to read the argonne file format for debugging purposes
+    std::vector<int> nodes = cnodes;
     std::vector<int> slot_lvol, lvol;
     int _nd = (int)nodes.size();
     int i, ntotal = 1;
@@ -710,6 +721,74 @@ class BlockedFieldVector {
   }
 };
 
+
+template<typename Field>
+class IdentityProjector : public LinearFunction<Field> {
+public:
+  IdentityProjector() {
+  }
+
+  void operator()(const Field& in, Field& out) {
+    out = in;
+  }
+};
+
+template<typename Field>
+class HighModeProjector : public LinearFunction<Field> {
+public:
+  int _N;
+  BlockedFieldVector<Field>& _evec;
+
+  HighModeProjector(BlockedFieldVector<Field>& evec, int N) : _N(N), _evec(evec) {
+  }
+
+  void operator()(const Field& in, Field& out) {
+    out = in;
+    for (int i = 0;i<_N;i++) {
+      Field v = _evec.get(i);
+      // |v><v|out>
+      axpy(out,-innerProduct(v,out),v,out);
+    }
+  }
+};
+
+template<typename Field>
+class HighModeAndBlockProjector : public LinearFunction<Field> {
+public:
+  int _N;
+  BlockedFieldVector<Field>& _evec;
+
+  HighModeAndBlockProjector(BlockedFieldVector<Field>& evec, int N) : _N(N), _evec(evec) {
+  }
+
+  void operator()(const Field& in, Field& out) {
+    Field tmp(in);
+    tmp = in;
+
+#if 0 // first keep low modes and try to re-find them
+    // (1 - sum_n |n><n|) 
+    // first get low modes out
+    for (int i = 0;i<_N;i++) {
+      Field v = _evec.get(i);
+      axpy(tmp,-innerProduct(v,tmp),v,tmp);
+    }
+#endif
+
+    out = zero;
+    out.checkerboard = tmp.checkerboard;
+#pragma omp parallel for
+    for (int b=0;b<_evec._bgrid._o_blocks;b++) {
+      for (int j=0;j<_evec._Nfull;j++) {
+	auto v = _evec._bgrid.block_sp(b,_evec._v[j],tmp);
+	_evec._bgrid.block_caxpy(b,out,v,_evec._v[j],out);
+      }
+    }
+
+    std::cout << GridLogMessage << "HighModeProjector norm2 = " << norm2(in) << " -> " << norm2(out) << std::endl;
+  }
+};
+
+
 /////////////////////////////////////////////////////////////
 // Implicitly restarted lanczos
 /////////////////////////////////////////////////////////////
@@ -740,6 +819,7 @@ public:
 
     OperatorFunction<Field>   &_poly;
 
+    LinearFunction<Field> &_proj;
     /////////////////////////
     // Constructor
     /////////////////////////
@@ -747,8 +827,9 @@ public:
     void Abort(int ff, DenseVector<RealD> &evals,  DenseVector<DenseVector<RealD> > &evecs);
 
     ImplicitlyRestartedLanczos(
-				LinearOperatorBase<Field> &Linop, // op
+			       LinearOperatorBase<Field> &Linop, // op
 			       OperatorFunction<Field> & poly,   // polynmial
+			       LinearFunction<Field> & proj,
 			       int _Nstop, // sought vecs
 			       int _Nk, // sought vecs
 			       int _Nm, // spare vecs
@@ -756,6 +837,7 @@ public:
 			       int _Niter) : // Max iterations
       _Linop(Linop),
       _poly(poly),
+      _proj(proj),
       Nstop(_Nstop),
       Nk(_Nk),
       Nm(_Nm),
@@ -768,12 +850,14 @@ public:
     ImplicitlyRestartedLanczos(
 				LinearOperatorBase<Field> &Linop, // op
 			       OperatorFunction<Field> & poly,   // polynmial
+			       LinearFunction<Field> & proj,
 			       int _Nk, // sought vecs
 			       int _Nm, // spare vecs
 			       RealD _eresid, // resid in lmdue deficit 
 			       int _Niter) : // Max iterations
       _Linop(Linop),
       _poly(poly),
+      _proj(proj),
       Nstop(_Nk),
       Nk(_Nk),
       Nm(_Nm),
@@ -827,24 +911,27 @@ public:
     void step(DenseVector<RealD>& lmd,
 	      DenseVector<RealD>& lme, 
 	      BlockedFieldVector<Field>& evec,
-	      Field& w,int Nm,int k)
+	      Field& w,int Nm,int k,int evec_offset)
     {
       assert( k< Nm );
 
-      Field evec_k = evec.get(k);
+      Field evec_k = evec.get(k + evec_offset);
 
-      _poly(_Linop,evec_k,w);      // 3. wk:=Avk−βkv_{k−1}
+      Field tmp(evec_k);
+      _proj(evec_k,w);
+      _poly(_Linop,w,tmp);      // 3. wk:=Avk−βkv_{k−1}
+      _proj(tmp,w);
 
 #if 0
       // Should we adopt the compression?
       if (k < Nm - 1) {
-	evec.put(k+1,w);
-	w = evec.get(k+1);
+	evec.put(k+1 + evec_offset,w);
+	w = evec.get(k+1+ evec_offset);
       }
 #endif
 
       if(k>0){
-	w -= lme[k-1] * evec.get(k-1);
+	w -= lme[k-1] * evec.get(k-1 + evec_offset);
       }    
 
       ComplexD zalph = innerProduct(evec_k,w); // 4. αk:=(wk,vk)
@@ -864,12 +951,12 @@ public:
       lme[k]  = beta;
 
       if (k>0) { 
-	orthogonalize(w,evec,k); // orthonormalise
+	orthogonalize(w,evec,k,evec_offset); // orthonormalise
       }
 
       if(k < Nm-1) { 
-	evec.put(k+1, w);
-	//w = evec.get(k+1);  // adopt compression for w?
+	evec.put(k+1 + evec_offset, w);
+	//w = evec.get(k+1 + evec_offset);  // adopt compression for w?
       }
 
     }
@@ -1126,7 +1213,7 @@ public:
 
     void orthogonalize(Field& w,
 		       BlockedFieldVector<Field>& evec,
-		       int k)
+		       int k, int evec_offset)
     {
       double t0=-usecond()/1e6;
       typedef typename Field::scalar_type MyComplex;
@@ -1143,7 +1230,7 @@ public:
 #endif
 
       for(int j=0; j<k; ++j){
-        Field evec_j = evec.get(j);
+        Field evec_j = evec.get(j + evec_offset);
 	ip = innerProduct(evec_j,w); // are the evecs normalised? ; this assumes so.
 	w = w - ip * evec_j;
       }
@@ -1175,14 +1262,14 @@ repeat
 until convergence
  */
 
-// alternate implementation for minimizing memory usage.  May affect the performance
     void calc(DenseVector<RealD>& eval,
 	      BlockedFieldVector<Field>& evec,
 	      const Field& src,
-	      int& Nconv)
+	      int& Nconv,
+	      int evec_offset = 0)
       {
 
-	GridBase *grid = evec.get(0)._grid;
+	GridBase *grid = evec.get(0 + evec_offset)._grid;
 	assert(grid == src._grid);
 
 	std::cout<<GridLogMessage << " -- Nk = " << Nk << " Np = "<< Np << std::endl;
@@ -1217,16 +1304,16 @@ until convergence
 	//	evec[0] = 1.0;
 	Field src_n=src;
 	normalise(src_n);
-	evec.put(0,src_n);
+	evec.put(0 + evec_offset,src_n);
 	std:: cout<<GridLogMessage <<"norm2(src)= " << norm2(src)<<std::endl;
 // << src._grid  << std::endl;
-	std:: cout<<GridLogMessage <<"norm2(evec[0])= " << norm2(evec.get(0)) <<std::endl;
+	std:: cout<<GridLogMessage <<"norm2(evec[0])= " << norm2(evec.get(0 + evec_offset)) <<std::endl;
 // << evec[0]._grid << std::endl;
 	
 	// Initial Nk steps
 	OrthoTime=0.;
 	double t0=usecond()/1e6;
-	for(int k=0; k<Nk; ++k) step(eval,lme,evec,f,Nm,k);
+	for(int k=0; k<Nk; ++k) step(eval,lme,evec,f,Nm,k,evec_offset);
 	double t1=usecond()/1e6;
 	std::cout<<GridLogMessage <<"IRL::Initial steps: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
 	std::cout<<GridLogMessage <<"IRL::Initial steps:OrthoTime "<<OrthoTime<< "seconds"<<std::endl;
@@ -1250,7 +1337,7 @@ until convergence
 	  // We loop over 
 	  //
 	OrthoTime=0.;
-	  for(int k=Nk; k<Nm; ++k) step(eval,lme,evec,f,Nm,k);
+	for(int k=Nk; k<Nm; ++k) step(eval,lme,evec,f,Nm,k,evec_offset);
 	t1=usecond()/1e6;
 	std::cout<<GridLogMessage <<"IRL:: "<<Np <<" steps: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
 	std::cout<<GridLogMessage <<"IRL::Initial steps:OrthoTime "<<OrthoTime<< "seconds"<<std::endl;
@@ -1310,7 +1397,7 @@ until convergence
 
 	assert(k2<Nm);
 	assert(k1>0);
-	evec.rotate(Qt,k1-1,k2+1,0,Nm);
+	evec.rotate(Qt,k1-1,k2+1,0,Nm,evec_offset);
 
 	t1=usecond()/1e6;
 	std::cout<<GridLogMessage <<"IRL::QR rotation: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
@@ -1318,13 +1405,13 @@ until convergence
 
 	  // Compressed vector f and beta(k2)
 	  f *= Qt[Nm-1+Nm*(k2-1)];
-	  f += lme[k2-1] * evec.get(k2);
+	  f += lme[k2-1] * evec.get(k2 + evec_offset);
 	  beta_k = norm2(f);
 	  beta_k = sqrt(beta_k);
 	  std::cout<<GridLogMessage<<" beta(k) = "<<beta_k<<std::endl;
 
 	  RealD betar = 1.0/beta_k;
-	  evec.put(k2, betar * f);
+	  evec.put(k2 + evec_offset, betar * f);
 	  lme[k2-1] = beta_k;
 
 	  // Convergence test
@@ -1345,23 +1432,30 @@ until convergence
 
 	{
 	  Field ev0_orig(grid);
-	  ev0_orig = evec.get(0);
+	  ev0_orig = evec.get(0 + evec_offset);
 	  
-	  evec.rotate(Qt,0,Nk,0,Nk);
+	  evec.rotate(Qt,0,Nk,0,Nk,evec_offset);
 	  
 	  {
 	    std::cout << GridLogMessage << "Test convergence" << std::endl;
 	    Field B(grid);
 	    
 	    for(int j = 0; j<Nk; ++j){
-	      B=evec.get(j);
-	      B.checkerboard = evec.get(0).checkerboard;
+	      B=evec.get(j + evec_offset);
+	      B.checkerboard = evec.get(0 + evec_offset).checkerboard;
 
 	      /*{
 		auto res = B._odata[0];
 		std::cout << GridLogMessage << " ev = " << res << std::endl;
 		}*/
-	      _Linop.HermOp(B,v);
+	      Field tmp(B);
+	      _proj(B,v);
+#if 0
+	      _Linop.HermOp(v,tmp);
+#else
+	      _poly(_Linop,v,tmp);      // 3. wk:=Avk−βkv_{k−1}
+#endif
+	      _proj(tmp,v);
 	      
 	      RealD vnum = real(innerProduct(B,v)); // HermOp.
 	      RealD vden = norm2(B);
@@ -1412,9 +1506,9 @@ until convergence
 	      
 	      RealD res_check_rotate_inverse = (qm*qmI - Eigen::MatrixXd::Identity(Nk,Nk)).norm(); // sqrt( |X|^2 )
 	      assert(res_check_rotate_inverse < 1e-7);
-	      evec.rotate(QtI,0,Nk,0,Nk);
+	      evec.rotate(QtI,0,Nk,0,Nk,evec_offset);
 	      
-	      axpy(ev0_orig,-1.0,evec.get(0),ev0_orig);
+	      axpy(ev0_orig,-1.0,evec.get(0 + evec_offset),ev0_orig);
 	      std::cout << GridLogMessage << "Rotation done (in " << timeInv.Elapsed() << " = " << timeInv.useconds() << " us" <<
 		", error = " << res_check_rotate_inverse << 
 		"); | evec[0] - evec[0]_orig | = " << ::sqrt(norm2(ev0_orig)) << std::endl;
@@ -1439,12 +1533,12 @@ until convergence
 	 
 	 // test
 	 for (int j=0;j<Nconv;j++) {
-	   std::cout<<GridLogMessage << " |e[" << j << "]|^2 = " << norm2(evec.get(j)) << std::endl;
+	   std::cout<<GridLogMessage << " |e[" << j << "]|^2 = " << norm2(evec.get(j + evec_offset)) << std::endl;
 	 }
        }
 
        //_sort.push(eval,evec,Nconv);
-       evec.sort(eval,Nconv);
+       //evec.sort(eval,Nconv);
        
        std::cout<<GridLogMessage << "\n Converged\n Summary :\n";
        std::cout<<GridLogMessage << " -- Iterations  = "<< Nconv  << "\n";

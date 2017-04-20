@@ -51,6 +51,7 @@ void LAPACK_dstegr(char *jobz, char *range, int *n, double *d, double *e,
 #include "DenseMatrix.h"
 #include "EigenSort.h"
 #include <zlib.h>
+#include <sys/stat.h>
 // eliminate temorary vector in calc()
 
 namespace Grid {
@@ -571,7 +572,9 @@ class BlockedFieldVector {
     return regu_coor * ls * 48 + pos[0] * 48 + co * 4 + simd_coor * 2;
   }
 
-  void read_argonne(const char* dir, const std::vector<int>& cnodes) {
+  bool read_argonne(const char* dir, const std::vector<int>& cnodes) {
+
+    assert(!_full_locked);
 
     // this is slow code to read the argonne file format for debugging purposes
     std::vector<int> nodes = cnodes;
@@ -626,7 +629,9 @@ class BlockedFieldVector {
 
       sprintf(buf,"%s/checksums.txt",dir);
       FILE* f = fopen(buf,"rt");
-      assert(f);
+      if (!f)
+	return false;
+
       for (int l=0;l<3+slot;l++)
 	fgets(buf,sizeof(buf),f);
       uint32_t crc_exp = strtol(buf, NULL, 16);
@@ -635,7 +640,8 @@ class BlockedFieldVector {
       // load one slot vector
       sprintf(buf,"%s/%2.2d/%10.10d",dir,slot/nperdir,slot);
       f = fopen(buf,"rb");
-      assert(f);
+      if (!f)
+	return false;
       
       fseeko(f,0,SEEK_END);
       off_t total_size = ftello(f);
@@ -718,6 +724,126 @@ class BlockedFieldVector {
 
     _bgrid._grid->Barrier();
     std::cout << GridLogMessage  << "Loading complete" << std::endl;
+
+    return true;
+  }
+
+  void write_argonne(const char* dir) {
+
+    char buf[4096];
+
+    assert(!_full_locked);
+
+    if (_bgrid._grid->IsBoss()) {
+      mkdir(dir,ACCESSPERMS);
+      
+      for (int i=0;i<32;i++) {
+	sprintf(buf,"%s/%2.2d",dir,i);
+	mkdir(buf,ACCESSPERMS);
+      }
+    }
+
+    _bgrid._grid->Barrier(); // make sure directories are ready
+
+
+    int nperdir = _bgrid._grid->_Nprocessors / 32;
+    std::cout << GridLogMessage << " Write " << dir << " nodes = " << _bgrid._grid->_Nprocessors << std::endl;
+
+    int slot;
+    Lexicographic::IndexFromCoor(_bgrid._grid->_processor_coor,slot,_bgrid._grid->_processors);
+    //printf("Slot: %d <> %d\n",slot, _bgrid._grid->ThisRank());
+
+    sprintf(buf,"%s/%2.2d/%10.10d",dir,slot/nperdir,slot);
+    FILE* f = fopen(buf,"wb");
+    assert(f);
+
+    int N = (int)_v.size();
+    uint32_t crc = 0x0;
+    int64_t cf_size = _bgrid._cf_size;
+    std::vector< float > rdata(cf_size*2);
+
+    GridStopWatch gsw1,gsw2;
+
+    for (int i=0;i<N;i++) {
+      // create buffer and put data in argonne format in there
+      std::vector<int> coor(_bgrid._l.size());
+      for (coor[1] = 0;coor[1]<_bgrid._l[1];coor[1]++) {
+	for (coor[2] = 0;coor[2]<_bgrid._l[2];coor[2]++) {
+	  for (coor[3] = 0;coor[3]<_bgrid._l[3];coor[3]++) {
+	    for (coor[4] = 0;coor[4]<_bgrid._l[4];coor[4]++) {
+	      for (coor[0] = 0;coor[0]<_bgrid._l[0];coor[0]++) {
+
+		if ((coor[1]+coor[2]+coor[3]+coor[4]) % 2 == 1) {
+		  // peek
+		  sobj sc;
+		  peekLocalSite(sc,_v[i],coor);
+		  for (int s=0;s<4;s++)
+		    for (int c=0;c<3;c++)
+		      *(std::complex<float>*)&rdata[get_bfm_index(&coor[0],c+s*3, &_bgrid._l[0] )] = sc()(s)(c);
+		}
+	      }
+	    }
+	  }
+	}
+      }
+	
+      // endian flip
+      for (int i=0;i<cf_size*2;i++) {
+	char* c = (char*)&rdata[i];
+	char tmp; int j;
+	for (j=0;j<2;j++) {
+	  tmp = c[j]; c[j] = c[3-j]; c[3-j] = tmp;
+	}
+      }
+
+      // create crc of buffer
+      gsw1.Start();
+      crc = crc32_threaded((unsigned char*)&rdata[0],cf_size*2*4,crc);    
+      gsw1.Stop();
+
+      // write out
+      gsw2.Start();
+      assert(fwrite(&rdata[0],cf_size*2*4,1,f)==1);
+      gsw2.Stop();
+
+    }
+
+    fclose(f);
+
+
+    // gather crc's and write out
+    std::vector<uint32_t> crcs(_bgrid._grid->_Nprocessors);
+    for (int i=0;i<_bgrid._grid->_Nprocessors;i++) {
+      crcs[i] = 0x0;
+    }
+    crcs[slot] = crc;
+    for (int i=0;i<_bgrid._grid->_Nprocessors;i++) {
+      _bgrid._grid->GlobalSum(crcs[i]);
+    }
+
+    if (_bgrid._grid->IsBoss()) {
+      sprintf(buf,"%s/checksums.txt",dir);
+      FILE* f = fopen(buf,"wt");
+      assert(f);
+      fprintf(f,"00000000\n\n");
+      for (int i =0;i<_bgrid._grid->_Nprocessors;i++)
+	fprintf(f,"%X\n",crcs[i]);
+      fclose(f);
+    }
+
+
+    std::cout << GridLogMessage << "Writing slot " << slot << " with "
+	      << N << " vectors in "
+	      << gsw2.Elapsed() << " at " 
+	      << ( (double)cf_size*2*4 * N / 1024./1024./1024. / gsw2.useconds()*1000.*1000. )
+	      << " GB/s  with crc computed at "
+	      << ( (double)cf_size*2*4 * N / 1024./1024./1024. / gsw1.useconds()*1000.*1000. )
+	      << " GB/s "
+	      << std::endl;
+
+    _bgrid._grid->Barrier();
+    std::cout << GridLogMessage  << "Writing complete" << std::endl;
+
   }
 };
 
@@ -755,27 +881,30 @@ public:
 template<typename Field>
 class HighModeAndBlockProjector : public LinearFunction<Field> {
 public:
-  int _N;
   BlockedFieldVector<Field>& _evec;
 
-  HighModeAndBlockProjector(BlockedFieldVector<Field>& evec, int N) : _N(N), _evec(evec) {
+  HighModeAndBlockProjector(BlockedFieldVector<Field>& evec) : _evec(evec) {
   }
 
   void operator()(const Field& in, Field& out) {
     Field tmp(in);
     tmp = in;
 
-#if 0 // first keep low modes and try to re-find them
+    GridStopWatch gsw1,gsw2;
+#if 1 // first keep low modes and try to re-find them
     // (1 - sum_n |n><n|) 
     // first get low modes out
-    for (int i = 0;i<_N;i++) {
+    for (int i = 0;i<_evec._Nfull;i++) {
       Field v = _evec.get(i);
+      gsw1.Start();
       axpy(tmp,-innerProduct(v,tmp),v,tmp);
+      gsw1.Stop();
     }
 #endif
 
     out = zero;
     out.checkerboard = tmp.checkerboard;
+    gsw2.Start();
 #pragma omp parallel for
     for (int b=0;b<_evec._bgrid._o_blocks;b++) {
       for (int j=0;j<_evec._Nfull;j++) {
@@ -783,8 +912,26 @@ public:
 	_evec._bgrid.block_caxpy(b,out,v,_evec._v[j],out);
       }
     }
+    gsw2.Stop();
 
-    std::cout << GridLogMessage << "HighModeProjector norm2 = " << norm2(in) << " -> " << norm2(out) << std::endl;
+    /*
+      Count flops
+
+      6 per complex multiply, 2 per complex add
+
+      innerProduct:    COUNT_FLOPS_BYTES(8 / 2 * f_size_block, 2*f_size_block*sizeof(OPT));
+      axpy:            COUNT_FLOPS_BYTES(8 / 2 * f_size_block, 3*f_size_block*sizeof(OPT));
+
+    */
+    double Gflops = _evec._bgrid._cf_size * 2 * (8 / 2) * 2 / 1024./1024./1024. * _evec._Nfull;
+    double Gbytes = _evec._bgrid._cf_size * 2 * sizeof(_evec._c[0])/2 * 5 / 1024./1024./1024. * _evec._Nfull;
+    double gsw1_s = gsw1.useconds() / 1000. / 1000.;
+    double gsw2_s = gsw2.useconds() / 1000. / 1000.;
+
+    std::cout << GridLogMessage << "HighModeProjector norm2 = " << norm2(in) << " -> " << norm2(out) << 
+      " at " << Gflops/gsw1_s << " Gflops/s, " << Gflops/gsw2_s << " Gflops/s, " <<
+      Gbytes/gsw1_s << " Gbytes/s, " << Gbytes/gsw2_s << " Gbytes/s" <<
+      std::endl;
   }
 };
 
@@ -1277,7 +1424,7 @@ until convergence
 	std::cout<<GridLogMessage << " -- size of eval   = " << eval.size() << std::endl;
 	std::cout<<GridLogMessage << " -- size of evec  = " << evec.size() << std::endl;
 	
-	assert(Nm == evec.size() && Nm == eval.size());
+	assert(Nm <= evec.size() && Nm <= eval.size());
 	
 	DenseVector<RealD> lme(Nm);  
 	DenseVector<RealD> lme2(Nm);

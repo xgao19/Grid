@@ -413,14 +413,14 @@ class BlockedFieldVector {
     }
   }
 
-  void rotate(DenseVector<RealD>& Qt,int j0, int j1, int k0,int k1,int evec_offset) {
+  void rotate(DenseVector<RealD>& Qt,int j0, int j1, int k0,int k1,int Nm,int evec_offset) {
     GridBase* grid = _v[0]._grid;
     
     if (!_full_locked) {
       
 #pragma omp parallel
       {
-	std::vector < vobj > B(_Nm);
+	std::vector < vobj > B(Nm);
 	
 #pragma omp for
 	for(int ss=0;ss < grid->oSites();ss++){
@@ -428,7 +428,7 @@ class BlockedFieldVector {
 	  
 	  for(int j=j0; j<j1; ++j){
 	    for(int k=k0; k<k1; ++k){
-	      B[j] +=Qt[k+_Nm*j] * _v[k + evec_offset]._odata[ss];
+	      B[j] +=Qt[k+Nm*j] * _v[k + evec_offset]._odata[ss];
 	    }
 	  }
 	  for(int j=j0; j<j1; ++j){
@@ -445,7 +445,7 @@ class BlockedFieldVector {
 #pragma omp parallel
       {
         std::vector<vCoeff_t> c0;
-	c0.resize(_Nfull*_Nm);
+	c0.resize(_Nfull*Nm);
 
 #pragma omp for
         for (int b=0;b<_bgrid._o_blocks;b++) {
@@ -454,7 +454,7 @@ class BlockedFieldVector {
 	      vCoeff_t& cc = c0[l + _Nfull*j];
 	      cc = 0.0;
 	      for(int k=k0; k<k1; ++k){
-		cc +=Qt[k+_Nm*j] * _c[ cidx((k+evec_offset),b,l) ];
+		cc +=Qt[k+Nm*j] * _c[ cidx((k+evec_offset),b,l) ];
 	      }
 	    }
           }
@@ -845,6 +845,7 @@ class BlockedFieldVector {
     std::cout << GridLogMessage  << "Writing complete" << std::endl;
 
   }
+
 };
 
 
@@ -1572,7 +1573,7 @@ until convergence
 
 	assert(k2<Nm);
 	assert(k1>0);
-	evec.rotate(Qt,k1-1,k2+1,0,Nm,evec_offset);
+	evec.rotate(Qt,k1-1,k2+1,0,Nm,Nm,evec_offset);
 
 	t1=usecond()/1e6;
 	std::cout<<GridLogMessage <<"IRL::QR rotation: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
@@ -1609,7 +1610,7 @@ until convergence
 	  Field ev0_orig(grid);
 	  ev0_orig = evec.get(0 + evec_offset);
 	  
-	  evec.rotate(Qt,0,Nk,0,Nk,evec_offset);
+	  evec.rotate(Qt,0,Nk,0,Nk,Nm,evec_offset);
 	  
 	  {
 	    std::cout << GridLogMessage << "Test convergence" << std::endl;
@@ -1682,7 +1683,7 @@ until convergence
 	      
 	      RealD res_check_rotate_inverse = (qm*qmI - Eigen::MatrixXd::Identity(Nk,Nk)).norm(); // sqrt( |X|^2 )
 	      assert(res_check_rotate_inverse < 1e-7);
-	      evec.rotate(QtI,0,Nk,0,Nk,evec_offset);
+	      evec.rotate(QtI,0,Nk,0,Nk,Nm,evec_offset);
 	      
 	      axpy(ev0_orig,-1.0,evec.get(0 + evec_offset),ev0_orig);
 	      std::cout << GridLogMessage << "Rotation done (in " << timeInv.Elapsed() << " = " << timeInv.useconds() << " us" <<

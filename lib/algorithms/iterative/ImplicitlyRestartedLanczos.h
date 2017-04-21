@@ -936,6 +936,33 @@ public:
 };
 
 
+template<typename Field>
+class BlockProjector : public LinearFunction<Field> {
+public:
+  BlockedFieldVector<Field>& _evec;
+
+  BlockProjector(BlockedFieldVector<Field>& evec) : _evec(evec) {
+  }
+
+  void operator()(const Field& in, Field& out) {
+    Field tmp(in);
+    tmp = in;
+
+  
+    out = zero;
+    out.checkerboard = tmp.checkerboard;
+
+#pragma omp parallel for
+    for (int b=0;b<_evec._bgrid._o_blocks;b++) {
+      for (int j=0;j<_evec._Nfull;j++) {
+	auto v = _evec._bgrid.block_sp(b,_evec._v[j],tmp);
+	_evec._bgrid.block_caxpy(b,out,v,_evec._v[j],out);
+      }
+    }
+  }
+};
+
+
 /////////////////////////////////////////////////////////////
 // Implicitly restarted lanczos
 /////////////////////////////////////////////////////////////
@@ -1421,6 +1448,7 @@ until convergence
 
 	std::cout<<GridLogMessage << " -- Nk = " << Nk << " Np = "<< Np << std::endl;
 	std::cout<<GridLogMessage << " -- Nm = " << Nm << std::endl;
+	std::cout<<GridLogMessage << " -- evec_offset = " << evec_offset << std::endl;
 	std::cout<<GridLogMessage << " -- size of eval   = " << eval.size() << std::endl;
 	std::cout<<GridLogMessage << " -- size of evec  = " << evec.size() << std::endl;
 	
@@ -1590,6 +1618,7 @@ until convergence
 	    for(int j = 0; j<Nk; ++j){
 	      B=evec.get(j + evec_offset);
 	      B.checkerboard = evec.get(0 + evec_offset).checkerboard;
+	      //std::cout << GridLogMessage << "Checkerboard: " << B.checkerboard << " norm2 = " << norm2(B) << std::endl;
 
 	      /*{
 		auto res = B._odata[0];

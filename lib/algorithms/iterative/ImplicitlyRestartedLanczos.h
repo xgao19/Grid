@@ -592,7 +592,8 @@ class BlockedFieldVector {
     }
 
     int nperdir = ntotal / 32;
-
+    if (nperdir < 1)
+      nperdir=1;
     std::cout << GridLogMessage << " Read " << dir << " nodes = " << nodes << std::endl;
     std::cout << GridLogMessage << " lvol = " << lvol << std::endl;
 
@@ -747,6 +748,8 @@ class BlockedFieldVector {
 
 
     int nperdir = _bgrid._grid->_Nprocessors / 32;
+    if (nperdir < 1)
+      nperdir=1;
     std::cout << GridLogMessage << " Write " << dir << " nodes = " << _bgrid._grid->_Nprocessors << std::endl;
 
     int slot;
@@ -828,6 +831,13 @@ class BlockedFieldVector {
       fprintf(f,"00000000\n\n");
       for (int i =0;i<_bgrid._grid->_Nprocessors;i++)
 	fprintf(f,"%X\n",crcs[i]);
+      fclose(f);
+
+      sprintf(buf,"%s/nodes.txt",dir);
+      f = fopen(buf,"wt");
+      assert(f);
+      for (int i =0;i<(int)_bgrid._grid->_processors.size();i++)
+	fprintf(f,"%d\n",_bgrid._grid->_processors[i]);
       fclose(f);
     }
 
@@ -964,6 +974,31 @@ public:
 };
 
 
+ template<class Field>
+   class ProjectedSchurOperator :  public SchurOperatorBase<Field> {
+ protected:
+   SchurOperatorBase<Field> &_Mat;
+   LinearFunction<Field> &_Pr;
+ public:
+   ProjectedSchurOperator (SchurOperatorBase<Field>& Mat, LinearFunction<Field>& Pr): _Mat(Mat), _Pr(Pr) {};
+   
+   virtual  RealD Mpc      (const Field &in, Field &out) {
+     assert(0);
+   }
+   virtual  RealD MpcDag   (const Field &in, Field &out){
+     assert(0);
+   }
+   virtual void MpcDagMpc(const Field &in, Field &out,RealD &ni,RealD &no) {
+     Field tmp(in._grid);
+     _Pr(in,out);
+     _Mat.MpcDagMpc(out,tmp,ni,no);
+     _Pr(tmp,out);
+     ni = 0; // OK for current purpose
+     no = 0;
+   }
+ };
+
+
 /////////////////////////////////////////////////////////////
 // Implicitly restarted lanczos
 /////////////////////////////////////////////////////////////
@@ -1090,12 +1125,23 @@ public:
     {
       assert( k< Nm );
 
+      GridStopWatch gsw_g,gsw_p,gsw_pr,gsw_cheb,gsw_o;
+
+      gsw_g.Start();
       Field evec_k = evec.get(k + evec_offset);
+      gsw_g.Stop();
 
       Field tmp(evec_k);
+
+      gsw_pr.Start();
       _proj(evec_k,w);
+      gsw_pr.Stop();
+      gsw_cheb.Start();
       _poly(_Linop,w,tmp);      // 3. wk:=Avk−βkv_{k−1}
+      gsw_cheb.Stop();
+      gsw_pr.Start();
       _proj(tmp,w);
+      gsw_pr.Stop();
 
 #if 0
       // Should we adopt the compression?
@@ -1125,14 +1171,24 @@ public:
       lmd[k] = alph;
       lme[k]  = beta;
 
+      gsw_o.Start();
       if (k>0) { 
 	orthogonalize(w,evec,k,evec_offset); // orthonormalise
       }
+      gsw_o.Stop();
 
+      gsw_p.Start();
       if(k < Nm-1) { 
 	evec.put(k+1 + evec_offset, w);
 	//w = evec.get(k+1 + evec_offset);  // adopt compression for w?
       }
+      gsw_p.Stop();
+
+      std::cout << GridLogMessage << "Timing: get=" << gsw_g.Elapsed() <<
+	" put="<< gsw_p.Elapsed() <<
+	" proj=" << gsw_pr.Elapsed() <<
+	" cheb=" << gsw_cheb.Elapsed() <<
+	" orth=" << gsw_o.Elapsed() << std::endl;
 
     }
 
@@ -1441,7 +1497,8 @@ until convergence
 	      BlockedFieldVector<Field>& evec,
 	      const Field& src,
 	      int& Nconv,
-	      int evec_offset = 0)
+	      int evec_offset = 0,
+	      bool test_conv_poly = false)
       {
 
 	GridBase *grid = evec.get(0 + evec_offset)._grid;
@@ -1627,11 +1684,10 @@ until convergence
 		}*/
 	      Field tmp(B);
 	      _proj(B,v);
-#if 0
-	      _Linop.HermOp(v,tmp);
-#else
-	      _poly(_Linop,v,tmp);      // 3. wk:=Avk−βkv_{k−1}
-#endif
+	      if (!test_conv_poly)
+		_Linop.HermOp(v,tmp);
+	      else
+		_poly(_Linop,v,tmp);      // 3. wk:=Avk−βkv_{k−1}
 	      _proj(tmp,v);
 	      
 	      RealD vnum = real(innerProduct(B,v)); // HermOp.

@@ -176,16 +176,20 @@ public:
 	//      "] = " << x._odata[ss]._internal(0)(0) 
 	//		      << std::endl;
       }
+
+      // Always do this sum in double ... can we do it??  Usually sum/globalsum is precision killer
+      // see what the effect on precision is
       return ret;
     }
 
+
     template<class T>
-    void vcaxpy(iScalar<T>& r,const vCoeff_t& a,const iScalar<T>& x,const iScalar<T>& y) {
+      void vcaxpy(iScalar<T>& r,const vCoeff_t& a,const iScalar<T>& x,const iScalar<T>& y) {
       vcaxpy(r._internal,a,x._internal,y._internal);
     }
 
     template<class T,int N>
-    void vcaxpy(iVector<T,N>& r,const vCoeff_t& a,const iVector<T,N>& x,const iVector<T,N>& y) {
+      void vcaxpy(iVector<T,N>& r,const vCoeff_t& a,const iVector<T,N>& x,const iVector<T,N>& y) {
       for (int i=0;i<N;i++)
 	vcaxpy(r._internal[i],a,x._internal[i],y._internal[i]);
     }
@@ -234,14 +238,16 @@ public:
 
 };
   
-template<class Field>
+template<class Field, class FieldHP>
 class BlockedFieldVector {
  public:
   int _Nm,  // number of total vectors
     _Nfull; // number of vectors kept in full precision
 
   typedef typename Field::scalar_type Coeff_t;
+  typedef typename FieldHP::scalar_type CoeffHP_t;
   typedef typename Field::vector_type vCoeff_t;
+  typedef typename FieldHP::vector_type vCoeffHP_t;
   typedef typename Field::vector_object vobj;
   typedef typename vobj::scalar_object sobj;
 
@@ -337,28 +343,62 @@ class BlockedFieldVector {
   }
 
   Field get_blocked(int i) {
+    // TODO: likely remove the code below, theory: it's just the global sum in put_blocked!!!
+      /*    if (sizeof(Coeff_t) != sizeof(CoeffHP_t)) {
 
-    Field ret(_bgrid._grid);
-    ret = zero;
-    ret.checkerboard = _v[0].checkerboard;
+      Field ret(_bgrid._grid);
+      ret = zero;
+      ret.checkerboard = _v[0].checkerboard;
+
+      FieldHP retHP(_bgrid._grid);
+      retHP = zero;
+      retHP.checkerboard = _v[0].checkerboard;
+      
+      FieldHP vj(_bgrid._grid);
+      
+#pragma omp parallel for
+      for (int b=0;b<_bgrid._o_blocks;b++) {
+	for (int j=0;j<_Nfull;j++) {
+	  precisionChange(vj,_v[j]);
+	  // need function that does precision change for _c ...
+	  // maybe first write _c as a bunch of lattice<..> objects ... or do it quickly by hand
+	  assert(0); // not implemented for now
+	  _bgrid.block_caxpy(b,retHP,_c[ cidx(i,b,j) ],vj,retHP);
+	}
+      }
+      
+      //ret.checkerboard = Even;
+      //retHP.checkerboard = Even;
+      //localConvert(retHP,ret);
+      //ret.checkerboard = _v[0].checkerboard;
+      precisionChange(ret,retHP);
+      return ret;
+      } else {*/
+      Field ret(_bgrid._grid);
+      ret = zero;
+      ret.checkerboard = _v[0].checkerboard;
 
 #pragma omp parallel for
-    for (int b=0;b<_bgrid._o_blocks;b++) {
-      for (int j=0;j<_Nfull;j++)
-	_bgrid.block_caxpy(b,ret,_c[ cidx(i,b,j) ],_v[j],ret);
-    }
+      for (int b=0;b<_bgrid._o_blocks;b++) {
+	for (int j=0;j<_Nfull;j++)
+	  _bgrid.block_caxpy(b,ret,_c[ cidx(i,b,j) ],_v[j],ret);
+      }
     
-    return ret;
+      return ret;
+      //}
   }
 
   void put_blocked(int i, const Field& rhs) {
+
+    Field tmp = rhs;
 
 #pragma omp parallel for
     for (int b=0;b<_bgrid._o_blocks;b++) {
       for (int j=0;j<_Nfull;j++) {
 	// |rhs> -= <j|rhs> |j>
 	
-	vCoeff_t v = _bgrid.block_sp(b,_v[j],rhs);
+	vCoeff_t v = _bgrid.block_sp(b,_v[j],tmp);
+	_bgrid.block_caxpy(b,tmp,-v,_v[j],tmp);
 	set_coef(i,b,j,v);
       }
     }
@@ -403,7 +443,7 @@ class BlockedFieldVector {
     } else {
       put_blocked(i,v);
 
-#if 0 // this is wasted time now that we have tested the code for correctness
+#if 1 // this is wasted time now that we have tested the code for correctness
       Field test = get_blocked(i);
       RealD nrm2b = norm2(test);
       axpy(test,-1.0,v,test);
@@ -417,7 +457,7 @@ class BlockedFieldVector {
     if (!_full_locked) {
       for(int j=0; j<k; ++j){
 	Field evec_j = _v[j + evec_offset];
-	Coeff_t ip = innerProduct(evec_j,w); // are the evecs normalised? ; this assumes so.
+	Coeff_t ip = (Coeff_t)innerProduct(evec_j,w); // are the evecs normalised? ; this assumes so.
 	w = w - ip * evec_j;
       }
     } else {
@@ -951,13 +991,13 @@ public:
   }
 };
 
-template<typename Field>
+ template<typename Field,typename FieldHP>
 class HighModeProjector : public LinearFunction<Field> {
 public:
   int _N;
-  BlockedFieldVector<Field>& _evec;
+  BlockedFieldVector<Field,FieldHP>& _evec;
 
-  HighModeProjector(BlockedFieldVector<Field>& evec, int N) : _N(N), _evec(evec) {
+ HighModeProjector(BlockedFieldVector<Field,FieldHP>& evec, int N) : _N(N), _evec(evec) {
   }
 
   void operator()(const Field& in, Field& out) {
@@ -970,12 +1010,12 @@ public:
   }
 };
 
-template<typename Field>
+ template<typename Field,typename FieldHP>
 class HighModeAndBlockProjector : public LinearFunction<Field> {
 public:
-  BlockedFieldVector<Field>& _evec;
+   BlockedFieldVector<Field,FieldHP>& _evec;
 
-  HighModeAndBlockProjector(BlockedFieldVector<Field>& evec) : _evec(evec) {
+ HighModeAndBlockProjector(BlockedFieldVector<Field,FieldHP>& evec) : _evec(evec) {
   }
 
   void operator()(const Field& in, Field& out) {
@@ -1028,12 +1068,12 @@ public:
 };
 
 
-template<typename Field>
+template<typename Field,typename FieldHP>
 class BlockProjector : public LinearFunction<Field> {
 public:
-  BlockedFieldVector<Field>& _evec;
+  BlockedFieldVector<Field,FieldHP>& _evec;
 
-  BlockProjector(BlockedFieldVector<Field>& evec) : _evec(evec) {
+ BlockProjector(BlockedFieldVector<Field,FieldHP>& evec) : _evec(evec) {
   }
 
   void operator()(const Field& in, Field& out) {
@@ -1161,7 +1201,8 @@ public:
     /////////////////////////
     // Sanity checked this routine (step) against Saad.
     /////////////////////////
-    void RitzMatrix(BlockedFieldVector<Field>& evec,int k){
+      template<typename FieldHP>
+      void RitzMatrix(BlockedFieldVector<Field,FieldHP>& evec,int k){
 
 #if 0
       if(1) return;
@@ -1199,9 +1240,10 @@ public:
 7. vk+1 := wk/βk+1
 8. EndDo
  */
+      template<typename FieldHP>
     void step(DenseVector<RealD>& lmd,
 	      DenseVector<RealD>& lme, 
-	      BlockedFieldVector<Field>& evec,
+	      BlockedFieldVector<Field,FieldHP>& evec,
 	      Field& w,int Nm,int k,int evec_offset)
     {
       assert( k< Nm );
@@ -1523,8 +1565,9 @@ public:
       return nn;
     }
 
+    template<typename FieldHP>
     void orthogonalize(Field& w,
-		       BlockedFieldVector<Field>& evec,
+		       BlockedFieldVector<Field,FieldHP>& evec,
 		       int k, int evec_offset)
     {
       double t0=-usecond()/1e6;
@@ -1571,8 +1614,9 @@ repeat
 until convergence
  */
 
+    template<typename FieldHP>
     void calc(DenseVector<RealD>& eval,
-	      BlockedFieldVector<Field>& evec,
+	      BlockedFieldVector<Field,FieldHP>& evec,
 	      const Field& src,
 	      int& Nconv,
 	      int evec_offset = 0,

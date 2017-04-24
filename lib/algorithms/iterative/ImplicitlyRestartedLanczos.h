@@ -257,11 +257,6 @@ class BlockedFieldVector {
   BlockedFieldVector(int Nm,GridBase* value,int Nfull,const std::vector<int>& block_size) : 
   _Nfull(Nfull), _Nm(Nm), _v(Nfull,value), _bgrid(value,block_size), _full_locked(false) {
 
-    _c.resize(_Nm*_Nfull*_bgrid._o_blocks);
-#pragma omp parallel for
-    for (int64_t i=0;i<_c.size();i++)
-      _c[i] = 0.0;
-
     std::cout << GridLogMessage << "BlockedFieldVector initialized:\n";
     std::cout << GridLogMessage << " Nm = " << Nm << "\n";
     std::cout << GridLogMessage << " Nfull = " << Nfull << "\n";
@@ -284,6 +279,12 @@ class BlockedFieldVector {
 
     assert(!_full_locked);
     _full_locked = true;
+
+    // resize appropriately
+    _c.resize(_Nm*_Nfull*_bgrid._o_blocks);
+#pragma omp parallel for
+    for (int64_t i=0;i<_c.size();i++)
+      _c[i] = 0.0;
 
     GridStopWatch sw;
     sw.Start();
@@ -372,10 +373,6 @@ class BlockedFieldVector {
 
     std::cout << GridLogMessage << "------------------" << std::endl;
 
-    if (i==31) {
-    _bgrid._grid->Barrier();
-    abort();
-    }
 #endif
 
   }
@@ -406,11 +403,95 @@ class BlockedFieldVector {
     } else {
       put_blocked(i,v);
 
+#if 0 // this is wasted time now that we have tested the code for correctness
       Field test = get_blocked(i);
       RealD nrm2b = norm2(test);
       axpy(test,-1.0,v,test);
       std::cout << GridLogMessage << "Error of vector: " << norm2(test) << " nrm2 = " << norm2(v) << " vs " << nrm2b << std::endl;
+#endif
     }
+  }
+
+  void orthogonalize(Field& w, int k, int evec_offset) {
+
+    if (!_full_locked) {
+      for(int j=0; j<k; ++j){
+	Field evec_j = _v[j + evec_offset];
+	Coeff_t ip = innerProduct(evec_j,w); // are the evecs normalised? ; this assumes so.
+	w = w - ip * evec_j;
+      }
+    } else {
+
+      // first represent w in blocks
+      std::vector< vCoeff_t > cw;
+      cw.resize(_Nfull*_bgrid._o_blocks);
+
+#pragma omp parallel for
+      for (int b=0;b<_bgrid._o_blocks;b++) {
+	for (int j=0;j<_Nfull;j++)
+	  cw[cidx(0,b,j)] = _bgrid.block_sp(b,_v[j],w);
+      }
+
+      // now can ortho just in coefficient space, should be much faster
+      // w     = cw[ cidx(0,b,j) ] * _v[j,b]
+      // _v[i] = _c[ cidx(i,b,j) ] * _v[j,b]
+
+      Coeff_t ip;
+#pragma omp parallel shared(ip)
+      {
+	for(int j=0; j<k; ++j) {
+
+#pragma omp barrier
+#pragma omp single
+	  {
+	    ip = 0;
+	  }
+
+	  //Field evec_j = _v[j + evec_offset];
+	  // evec_j = _c[ cidx(j + evec_offset,b,l) ] * _v[l,b]
+	  
+	  // ip = innerProduct(evec_j,w);
+	  // ip = conj(_c[ cidx(j + evec_offset,b,l) ]) * innerProduct(_v[l,b],_v[l',b']) * cw[ cidx(0,b',l') ]
+	  //    = conj(_c[ cidx(j + evec_offset,b,l) ]) * cw[ cidx(0,b,l) ]
+	  Coeff_t ipl = 0;
+#pragma omp for
+	  for (int b=0;b<_bgrid._o_blocks;b++) {
+	    for (int l=0;l<_Nfull;l++)
+	      ipl += Reduce(conjugate(_c[ cidx(j + evec_offset,b,l) ]) * cw[ cidx(0,b,l) ]);
+	  }
+
+#pragma omp critical
+	  {
+	    ip += ipl;
+	  }
+
+#pragma omp barrier
+#pragma omp single
+	  {
+	    _bgrid._grid->GlobalSum(ip);
+	    //std::cout << GridLogMessage << "Overlap of " << k << " with " << j << " is " << ipl << std::endl;
+	  }
+
+
+	  //w = w - ip * evec_j;
+#pragma omp for
+	  for (int b=0;b<_bgrid._o_blocks;b++) {
+	    for (int l=0;l<_Nfull;l++)
+	      cw[ cidx(0,b,l) ] -= ip* _c[ cidx(j+evec_offset,b,l) ];
+	  }
+	}
+      }
+
+      // reconstruct w
+      w = zero;
+#pragma omp parallel for
+      for (int b=0;b<_bgrid._o_blocks;b++) {
+	for (int j=0;j<_Nfull;j++)
+	  _bgrid.block_caxpy(b,w,cw[ cidx(0,b,j) ],_v[j],w);
+      }
+
+    }
+
   }
 
   void rotate(DenseVector<RealD>& Qt,int j0, int j1, int k0,int k1,int Nm,int evec_offset) {
@@ -1460,11 +1541,8 @@ public:
 	}
 #endif
 
-      for(int j=0; j<k; ++j){
-        Field evec_j = evec.get(j + evec_offset);
-	ip = innerProduct(evec_j,w); // are the evecs normalised? ; this assumes so.
-	w = w - ip * evec_j;
-      }
+	evec.orthogonalize(w,k,evec_offset);
+
       normalise(w);
       t0+=usecond()/1e6;
       OrthoTime +=t0;

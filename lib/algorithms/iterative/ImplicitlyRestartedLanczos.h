@@ -57,10 +57,15 @@ void LAPACK_dstegr(char *jobz, char *range, int *n, double *d, double *e,
 namespace Grid {
 
 
-template<typename vCoeff_t,typename Field>
+  template<typename Field,typename FieldHP>
 class BlockedGrid {
 public:
   GridBase* _grid;
+
+  typedef typename Field::scalar_type Coeff_t;
+  typedef typename FieldHP::scalar_type CoeffHP_t;
+  typedef typename Field::vector_type vCoeff_t;
+  typedef typename FieldHP::vector_type vCoeffHP_t;
   
   std::vector<int> _bs; // block size
   std::vector<int> _nb; // number of blocks
@@ -156,30 +161,54 @@ public:
       return i;
     }
 
+    void hpInner(std::vector<CoeffHP_t>& ret,const vCoeff_t& x,const vCoeff_t& y) {
+      int Nsimd = (int)ret.size();
+      for (int i=0;i<Nsimd;i++)
+	ret[i] += conjugate((CoeffHP_t)(((Coeff_t*)&x)[i])) * (CoeffHP_t)(((Coeff_t*)&y)[i]);
+    }
+
+    template<class T>
+    void hpInner(std::vector<CoeffHP_t>& ret,const iScalar<T>& x,const iScalar<T>& y) {
+      hpInner(ret,x._internal,y._internal);
+    }
+
+    template<class T,int N>
+    void hpInner(std::vector<CoeffHP_t>& ret,const iVector<T,N>& x,const iVector<T,N>& y) {
+      for (int i=0;i<N;i++)
+	hpInner(ret,x._internal[i],y._internal[i]);
+    }
+
     vCoeff_t block_sp(int b, const Field& x, const Field& y) {
 
       std::vector<int> x0;
       block_to_coor(b,x0);
 
-      //std::cout << GridLogMessage << "Coor x0 = " << x0 << std::endl;
-      
-      vCoeff_t ret = 0.0;
+      if (sizeof(Coeff_t) != sizeof(CoeffHP_t)) {
+	int Nsimd = sizeof(vCoeff_t) / sizeof(Coeff_t);
+	std::vector<CoeffHP_t> bufHP(Nsimd);
+	for (int i=0;i<Nsimd;i++)
+	  bufHP[i] = 0.0;
 
-      for (int i=0;i<_block_sites;i++) { // only odd sites
-	int ss = block_site_to_o_site(x0,i);
-	//std::cout << GridLogMessage << i << "/" << _o_block_sites << " -> " << ss << std::endl;
-	ret += TensorRemove(innerProduct(x._odata[ss],y._odata[ss]));
+	for (int i=0;i<_block_sites;i++) { // only odd sites
+	  int ss = block_site_to_o_site(x0,i);
+	  hpInner(bufHP,x._odata[ss],y._odata[ss]);
+	}
 
-	//for (int s=0;s<4;s++)
-	//  for (int c=0;c<3;c++)
-	//    std::cout << GridLogMessage << i << "|" << ss << " x[" << 
-	//      "] = " << x._odata[ss]._internal(0)(0) 
-	//		      << std::endl;
+	vCoeff_t ret;
+	for (int i=0;i<Nsimd;i++)
+	  ((Coeff_t*)&ret)[i] = (Coeff_t)bufHP[i];
+
+	return ret;
+
+      } else {
+	vCoeff_t ret = 0.0;
+	for (int i=0;i<_block_sites;i++) { // only odd sites
+	  int ss = block_site_to_o_site(x0,i);
+	  ret += TensorRemove(innerProduct(x._odata[ss],y._odata[ss]));
+	}
+	return ret;
       }
 
-      // Always do this sum in double ... can we do it??  Usually sum/globalsum is precision killer
-      // see what the effect on precision is
-      return ret;
     }
 
 
@@ -202,7 +231,7 @@ public:
 
       std::vector<int> x0;
       block_to_coor(b,x0);
-      
+
       for (int i=0;i<_block_sites;i++) { // only odd sites
 	int ss = block_site_to_o_site(x0,i);
 	vcaxpy(ret._odata[ss],a,x._odata[ss],y._odata[ss]);
@@ -251,7 +280,7 @@ class BlockedFieldVector {
   typedef typename Field::vector_object vobj;
   typedef typename vobj::scalar_object sobj;
 
-  BlockedGrid<vCoeff_t,Field> _bgrid;
+  BlockedGrid<Field,FieldHP> _bgrid;
   
   std::vector<Field> _v; // _Nfull vectors
   std::vector< vCoeff_t > _c; 
@@ -343,49 +372,17 @@ class BlockedFieldVector {
   }
 
   Field get_blocked(int i) {
-    // TODO: likely remove the code below, theory: it's just the global sum in put_blocked!!!
-      /*    if (sizeof(Coeff_t) != sizeof(CoeffHP_t)) {
-
-      Field ret(_bgrid._grid);
-      ret = zero;
-      ret.checkerboard = _v[0].checkerboard;
-
-      FieldHP retHP(_bgrid._grid);
-      retHP = zero;
-      retHP.checkerboard = _v[0].checkerboard;
-      
-      FieldHP vj(_bgrid._grid);
-      
-#pragma omp parallel for
-      for (int b=0;b<_bgrid._o_blocks;b++) {
-	for (int j=0;j<_Nfull;j++) {
-	  precisionChange(vj,_v[j]);
-	  // need function that does precision change for _c ...
-	  // maybe first write _c as a bunch of lattice<..> objects ... or do it quickly by hand
-	  assert(0); // not implemented for now
-	  _bgrid.block_caxpy(b,retHP,_c[ cidx(i,b,j) ],vj,retHP);
-	}
-      }
-      
-      //ret.checkerboard = Even;
-      //retHP.checkerboard = Even;
-      //localConvert(retHP,ret);
-      //ret.checkerboard = _v[0].checkerboard;
-      precisionChange(ret,retHP);
-      return ret;
-      } else {*/
-      Field ret(_bgrid._grid);
-      ret = zero;
-      ret.checkerboard = _v[0].checkerboard;
-
-#pragma omp parallel for
-      for (int b=0;b<_bgrid._o_blocks;b++) {
-	for (int j=0;j<_Nfull;j++)
-	  _bgrid.block_caxpy(b,ret,_c[ cidx(i,b,j) ],_v[j],ret);
-      }
+    Field ret(_bgrid._grid);
+    ret = zero;
+    ret.checkerboard = _v[0].checkerboard;
     
-      return ret;
-      //}
+#pragma omp parallel for
+    for (int b=0;b<_bgrid._o_blocks;b++) {
+      for (int j=0;j<_Nfull;j++)
+	_bgrid.block_caxpy(b,ret,_c[ cidx(i,b,j) ],_v[j],ret);
+    }
+    
+    return ret;
   }
 
   void put_blocked(int i, const Field& rhs) {
@@ -398,22 +395,10 @@ class BlockedFieldVector {
 	// |rhs> -= <j|rhs> |j>
 	
 	vCoeff_t v = _bgrid.block_sp(b,_v[j],tmp);
-	_bgrid.block_caxpy(b,tmp,-v,_v[j],tmp);
+	//_bgrid.block_caxpy(b,tmp,-v,_v[j],tmp);
 	set_coef(i,b,j,v);
       }
     }
-
-#if 0
-    std::cout << GridLogMessage << "------------------" << std::endl;
-    for (int b=0;b<_bgrid._o_blocks;b++) {
-      for (int j=0;j<_Nfull;j++) {
-    std::cout << GridLogMessage << " c[" << i << ", " << b << ", " << j << "] = " << _c[ cidx(i,b,j) ] << std::endl;
-  }
-  }
-
-    std::cout << GridLogMessage << "------------------" << std::endl;
-
-#endif
 
   }
 
@@ -1088,6 +1073,7 @@ public:
     for (int b=0;b<_evec._bgrid._o_blocks;b++) {
       for (int j=0;j<_evec._Nfull;j++) {
 	auto v = _evec._bgrid.block_sp(b,_evec._v[j],tmp);
+	_evec._bgrid.block_caxpy(b,tmp,-v,_evec._v[j],tmp); // try this for precision
 	_evec._bgrid.block_caxpy(b,out,v,_evec._v[j],out);
       }
     }

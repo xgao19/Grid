@@ -159,6 +159,27 @@ public:
       return i;
     }
 
+    vCoeff_t block_sp_mixed(int b, const Lattice<TX>& x, const Lattice<TY>& y) {
+
+      std::vector<int> x0;
+      block_to_coor(b,x0);
+
+      int Nsimd = sizeof(vCoeff_t) / sizeof(Coeff_t);
+      std::vector<Coeff_t> ret;
+      for (int i=0;i<Nsimd;i++)
+	ret[i] = 0.0;
+      for (int i=0;i<_block_sites;i++) { // only odd sites
+	int ss = block_site_to_o_site(x0,i);
+
+	abort(0);
+
+	// convert ss to Nsimd positions, get elements for those positions from x and y ...
+      }
+
+      return ret;
+
+    }
+
     vCoeff_t block_sp(int b, const Field& x, const Field& y) {
 
       std::vector<int> x0;
@@ -317,7 +338,7 @@ class BlockedFieldVector {
 
   }
 
-  Field get_blocked(int i) {
+  FieldHP get_blocked(int i) {
     FieldHP ret(_bgrid._grid);
     ret = zero;
     ret.checkerboard = _v[0].checkerboard;
@@ -330,15 +351,13 @@ class BlockedFieldVector {
 	_bgrid.block_caxpy(b,ret,_c[ cidx(i,b,j) ],vj,ret);
     }
     
-    Field _ret(_v[0]._grid);
-    precisionChange(_ret,ret);
-    return _ret;
+    return ret;
   }
 
-  void put_blocked(int i, const Field& rhs) {
+  void put_blocked(int i, const FieldHP& rhs) {
 
     FieldHP tmp(_bgrid._grid);
-    precisionChange(tmp,rhs);
+    tmp = rhs;
 
     for (int j=0;j<_Nfull;j++) {
       FieldHP vj(_bgrid._grid);
@@ -353,34 +372,41 @@ class BlockedFieldVector {
 
   }
 
-  Field get(int i) {
+  FieldHP get(int i) {
     if (!_full_locked) {
+
       assert(i < _Nfull);
-      return _v[i];
+      FieldHP tmp(_bgrid._grid);
+      precisionChange(tmp,_v[i]);
+      return tmp;
+
     } else {
+
       return get_blocked(i);
+
     }
   }
 
-  void put(int i, const Field& v) {
+  void put(int i, const FieldHP& v) {
     //std::cout << GridLogMessage << "::put(" << i << ")\n";
 
     if (!_full_locked && i >= _Nfull) {
       // lock in smallest vectors so we can build on them
-      Field test = _v[_Nfull - 1];
+      //Field test = _v[_Nfull - 1];
       lock_in_full_vectors();
-      axpy(test,-1.0,get_blocked(_Nfull - 1),test);
-      std::cout << GridLogMessage << "Error of lock_in_full_vectors: " << norm2(test) << std::endl;
+      //axpy(test,-1.0,get_blocked(_Nfull - 1),test);
+      //std::cout << GridLogMessage << "Error of lock_in_full_vectors: " << norm2(test) << std::endl;
     }
 
     if (!_full_locked) {
       assert(i < _Nfull);
-      _v[i] = v;
+      //_v[i] = v;
+      precisionChange(_v[i],v);
     } else {
       put_blocked(i,v);
 
-#if 1 // this is wasted time now that we have tested the code for correctness
-      Field test = get_blocked(i);
+#if 0 // this is wasted time now that we have tested the code for correctness
+      FieldHP test = get_blocked(i);
       RealD nrm2b = norm2(test);
       axpy(test,-1.0,v,test);
       std::cout << GridLogMessage << "Error of vector: " << norm2(test) << " nrm2 = " << norm2(v) << " vs " << nrm2b << std::endl;
@@ -388,13 +414,9 @@ class BlockedFieldVector {
     }
   }
 
-  void orthogonalize(Field& w, int k, int evec_offset) {
+  void orthogonalize(FieldHP& whp, int k, int evec_offset) {
 
     if (!_full_locked) {
-
-#if 0
-      FieldHP whp(_bgrid._grid);
-      precisionChange(whp,w);
 
       for(int j=0; j<k; ++j){
 	FieldHP evec_j(_bgrid._grid);
@@ -406,18 +428,7 @@ class BlockedFieldVector {
 	//w = w - ip * evec_j;
       }
 
-      precisionChange(w,whp);
-#else
-      for(int j=0; j<k; ++j){
-	Field evec_j = _v[j + evec_offset];
-	Coeff_t ip = (Coeff_t)innerProduct(evec_j,w); // are the evecs normalised? ; this assumes so.
-	w = w - ip * evec_j;
-      }
-#endif
     } else {
-
-      FieldHP whp(_bgrid._grid);
-      precisionChange(whp,w);
 
       // first represent w in blocks
       std::vector< vCoeffHP_t > cw;
@@ -494,8 +505,6 @@ class BlockedFieldVector {
 	  _bgrid.block_caxpy(b,whp,cw[ cidx(0,b,j) ],vj,whp);
 	}
       }
-
-      precisionChange(w,whp); // return in lower precision
 
     }
 
@@ -1037,36 +1046,32 @@ public:
 
 
 template<typename Field,typename FieldHP>
-class BlockProjector : public LinearFunction<Field> {
+class BlockProjector : public LinearFunction<FieldHP> {
 public:
   BlockedFieldVector<Field,FieldHP>& _evec;
 
   BlockProjector(BlockedFieldVector<Field,FieldHP>& evec) : _evec(evec) {
   }
 
-  void operator()(const Field& in, Field& out) {
+  void operator()(const FieldHP& in, FieldHP& outhp) {
     FieldHP tmp(_evec._bgrid._grid);
-    FieldHP outhp(_evec._bgrid._grid);
-    precisionChange(tmp,in);
+    tmp = in;
 
     outhp = zero;
 
     outhp.checkerboard = in.checkerboard;
-    out.checkerboard = in.checkerboard;
     tmp.checkerboard = in.checkerboard;
 
     for (int j=0;j<_evec._Nfull;j++) {
-      FieldHP vj(_evec._bgrid._grid);
-      precisionChange(vj,_evec._v[j]);
+      //      FieldHP vj(_evec._bgrid._grid);
+      //precisionChange(vj,_evec._v[j]);
 
 #pragma omp parallel for
       for (int b=0;b<_evec._bgrid._o_blocks;b++) {
-	_evec._bgrid.block_caxpy(b,outhp,_evec._bgrid.block_sp(b,vj,tmp),vj,outhp);
+	_evec._bgrid.block_caxpy_mixed(b,outhp,_evec._bgrid.block_sp_mixed(b,_evec._v[j],tmp),_evec._v[j],outhp);
       }
 
     }
-
-    precisionChange(out,outhp);
   }
 };
 
@@ -1100,7 +1105,7 @@ public:
 // Implicitly restarted lanczos
 /////////////////////////////////////////////////////////////
 
-template<class Field> 
+ template<class Field,class FieldHP> 
     class ImplicitlyRestartedLanczos {
 
     const RealD small = 1.0e-16;
@@ -1110,6 +1115,7 @@ public:
     int Niter;
     int converged;
 
+    int Nminres; // Minimum number of restarts; only check for convergence after
     int Nstop;   // Number of evecs checked for convergence
     int Nk;      // Number of converged sought
     int Np;      // Np -- Number of spare vecs in kryloc space
@@ -1126,7 +1132,7 @@ public:
 
     OperatorFunction<Field>   &_poly;
 
-    LinearFunction<Field> &_proj;
+    LinearFunction<FieldHP> &_proj;
     /////////////////////////
     // Constructor
     /////////////////////////
@@ -1136,12 +1142,13 @@ public:
     ImplicitlyRestartedLanczos(
 			       LinearOperatorBase<Field> &Linop, // op
 			       OperatorFunction<Field> & poly,   // polynmial
-			       LinearFunction<Field> & proj,
+			       LinearFunction<FieldHP> & proj,
 			       int _Nstop, // sought vecs
 			       int _Nk, // sought vecs
 			       int _Nm, // spare vecs
 			       RealD _eresid, // resid in lmdue deficit 
-			       int _Niter) : // Max iterations
+			       int _Niter, // Max iterations
+			       int _Nminres) :
       _Linop(Linop),
       _poly(poly),
       _proj(proj),
@@ -1149,7 +1156,8 @@ public:
       Nk(_Nk),
       Nm(_Nm),
       eresid(_eresid),
-      Niter(_Niter)
+      Niter(_Niter),
+      Nminres(_Nminres)
     { 
       Np = Nm-Nk; assert(Np>0);
     };
@@ -1157,11 +1165,12 @@ public:
     ImplicitlyRestartedLanczos(
 				LinearOperatorBase<Field> &Linop, // op
 			       OperatorFunction<Field> & poly,   // polynmial
-			       LinearFunction<Field> & proj,
+			       LinearFunction<FieldHP> & proj,
 			       int _Nk, // sought vecs
 			       int _Nm, // spare vecs
 			       RealD _eresid, // resid in lmdue deficit 
-			       int _Niter) : // Max iterations
+			       int _Niter, // Max iterations
+			       int _Nminres) : 
       _Linop(Linop),
       _poly(poly),
       _proj(proj),
@@ -1169,7 +1178,8 @@ public:
       Nk(_Nk),
       Nm(_Nm),
       eresid(_eresid),
-      Niter(_Niter)
+      Niter(_Niter),
+      Nminres(_Nminres)
     { 
       Np = Nm-Nk; assert(Np>0);
     };
@@ -1177,7 +1187,6 @@ public:
     /////////////////////////
     // Sanity checked this routine (step) against Saad.
     /////////////////////////
-      template<typename FieldHP>
       void RitzMatrix(BlockedFieldVector<Field,FieldHP>& evec,int k){
 
 #if 0
@@ -1216,27 +1225,30 @@ public:
 7. vk+1 := wk/βk+1
 8. EndDo
  */
-      template<typename FieldHP>
     void step(DenseVector<RealD>& lmd,
 	      DenseVector<RealD>& lme, 
 	      BlockedFieldVector<Field,FieldHP>& evec,
-	      Field& w,int Nm,int k,int evec_offset)
+	      FieldHP& w,int Nm,int k,int evec_offset)
     {
       assert( k< Nm );
 
       GridStopWatch gsw_g,gsw_p,gsw_pr,gsw_cheb,gsw_o;
 
       gsw_g.Start();
-      Field evec_k = evec.get(k + evec_offset);
+      FieldHP evec_k = evec.get(k + evec_offset);
       gsw_g.Stop();
 
-      Field tmp(evec_k);
+      Field wLP(evec._v[0]._grid);
+      FieldHP tmp(evec_k);
+      Field tmpLP(wLP);
 
       gsw_pr.Start();
       _proj(evec_k,w);
       gsw_pr.Stop();
       gsw_cheb.Start();
-      _poly(_Linop,w,tmp);      // 3. wk:=Avk−βkv_{k−1}
+      precisionChange(wLP,w);
+      _poly(_Linop,wLP,tmpLP);      // 3. wk:=Avk−βkv_{k−1}
+      precisionChange(tmp,tmpLP);
       gsw_cheb.Stop();
       gsw_pr.Start();
       _proj(tmp,w);
@@ -1533,7 +1545,8 @@ public:
     }
 
 #if 1
-    static RealD normalise(Field& v) 
+    template<typename T>
+    static RealD normalise(T& v) 
     {
       RealD nn = norm2(v);
       nn = sqrt(nn);
@@ -1541,8 +1554,7 @@ public:
       return nn;
     }
 
-    template<typename FieldHP>
-    void orthogonalize(Field& w,
+    void orthogonalize(FieldHP& w,
 		       BlockedFieldVector<Field,FieldHP>& evec,
 		       int k, int evec_offset)
     {
@@ -1550,17 +1562,7 @@ public:
       typedef typename Field::scalar_type MyComplex;
       MyComplex ip;
 
-#if 0
-	for(int j=0; j<k; ++j){
-	  normalise(evec[j]);
-	  for(int i=0;i<j;i++){
-	    ip = innerProduct(evec[i],evec[j]); // are the evecs normalised? ; this assumes so.
-	    evec[j] = evec[j] - ip *evec[i];
-	  }
-	}
-#endif
-
-	evec.orthogonalize(w,k,evec_offset);
+      evec.orthogonalize(w,k,evec_offset);
 
       normalise(w);
       t0+=usecond()/1e6;
@@ -1590,16 +1592,15 @@ repeat
 until convergence
  */
 
-    template<typename FieldHP>
     void calc(DenseVector<RealD>& eval,
 	      BlockedFieldVector<Field,FieldHP>& evec,
-	      const Field& src,
+	      const FieldHP& src,
 	      int& Nconv,
 	      int evec_offset = 0,
 	      bool test_conv_poly = false)
       {
 
-	GridBase *grid = evec.get(0 + evec_offset)._grid;
+	GridBase *grid = evec._bgrid._grid;//evec.get(0 + evec_offset)._grid;
 	assert(grid == src._grid);
 
 	std::cout<<GridLogMessage << " -- Nk = " << Nk << " Np = "<< Np << std::endl;
@@ -1616,12 +1617,9 @@ until convergence
 	DenseVector<RealD> Qt(Nm*Nm);
 	DenseVector<int>   Iconv(Nm);
 
-#if (!defined MEM_SAVE )
-	DenseVector<Field>  B(Nm,grid); // waste of space replicating
-#endif
-	
-	Field f(grid);
-	Field v(grid);
+
+	FieldHP f(grid);
+	FieldHP v(grid);
   
 	int k1 = 1;
 	int k2 = Nk;
@@ -1633,7 +1631,7 @@ until convergence
 	// Set initial vector
 	// (uniform vector) Why not src??
 	//	evec[0] = 1.0;
-	Field src_n=src;
+	FieldHP src_n=src;
 	normalise(src_n);
 	evec.put(0 + evec_offset,src_n);
 	std:: cout<<GridLogMessage <<"norm2(src)= " << norm2(src)<<std::endl;
@@ -1660,23 +1658,23 @@ until convergence
 
 	// Restarting loop begins
 	for(int iter = 0; iter<Niter; ++iter){
-
+	  
 	  std::cout<<GridLogMessage<<"\n Restart iteration = "<< iter << std::endl;
-
+	  
 	  // 
 	  // Rudy does a sort first which looks very different. Getting fed up with sorting out the algo defs.
 	  // We loop over 
 	  //
-	OrthoTime=0.;
-	for(int k=Nk; k<Nm; ++k) step(eval,lme,evec,f,Nm,k,evec_offset);
-	t1=usecond()/1e6;
-	std::cout<<GridLogMessage <<"IRL:: "<<Np <<" steps: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
-	std::cout<<GridLogMessage <<"IRL::Initial steps:OrthoTime "<<OrthoTime<< "seconds"<<std::endl;
+	  OrthoTime=0.;
+	  for(int k=Nk; k<Nm; ++k) step(eval,lme,evec,f,Nm,k,evec_offset);
+	  t1=usecond()/1e6;
+	  std::cout<<GridLogMessage <<"IRL:: "<<Np <<" steps: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
+	  std::cout<<GridLogMessage <<"IRL::Initial steps:OrthoTime "<<OrthoTime<< "seconds"<<std::endl;
 	  f *= lme[Nm-1];
-
+	  
 	  RitzMatrix(evec,k2);
-	t1=usecond()/1e6;
-	std::cout<<GridLogMessage <<"IRL:: RitzMatrix: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
+	  t1=usecond()/1e6;
+	  std::cout<<GridLogMessage <<"IRL:: RitzMatrix: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
 	  
 	  // getting eigenvalues
 	  for(int k=0; k<Nm; ++k){
@@ -1685,66 +1683,48 @@ until convergence
 	  }
 	  setUnit_Qt(Nm,Qt);
 	  diagonalize(eval2,lme2,Nm,Nm,Qt,grid);
-	t1=usecond()/1e6;
-	std::cout<<GridLogMessage <<"IRL:: diagonalize: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
-
+	  t1=usecond()/1e6;
+	  std::cout<<GridLogMessage <<"IRL:: diagonalize: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
+	  
 	  // sorting
 	  _sort.push(eval2,Nm);
-	t1=usecond()/1e6;
-	std::cout<<GridLogMessage <<"IRL:: eval sorting: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
+	  t1=usecond()/1e6;
+	  std::cout<<GridLogMessage <<"IRL:: eval sorting: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
 	  
 	  // Implicitly shifted QR transformations
 	  setUnit_Qt(Nm,Qt);
 	  for(int ip=0; ip<k2; ++ip){
-	std::cout<<GridLogMessage << "eval "<< ip << " "<< eval2[ip] << std::endl;
-	}
-	  for(int ip=k2; ip<Nm; ++ip){ 
-	std::cout<<GridLogMessage << "qr_decomp "<< ip << " "<< eval2[ip] << std::endl;
-	    qr_decomp(eval,lme,Nm,Nm,Qt,eval2[ip],k1,Nm);
-		
-	}
-	t1=usecond()/1e6;
-	std::cout<<GridLogMessage <<"IRL::qr_decomp: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
-	assert(k2<Nm);
-
-#if 0
-	if (grid->ThisRank() == 0){
-	  printf("Q:\n");
-	  for (int j=0;j<Nm; j++) {
-	    RealD n2 = 0.0;
-	    RealD n8 = 0.0;
-
-	    for(int k=0; k<Nm ; ++k){
-	      RealD a = ::fabs(Qt[k+Nm*j]);
-	      //printf("%5.5g ",a);
-	      n2 += ::pow(a,2.0);
-	      n8 += ::pow(a,8.0);
-	    }
-
-	    printf("%d = %g\n",j,::pow(n8,1.0/8.0) / ::pow(n2,1.0/2.0));
+	    std::cout<<GridLogMessage << "eval "<< ip << " "<< eval2[ip] << std::endl;
 	  }
-	}
-#endif
+	  for(int ip=k2; ip<Nm; ++ip){ 
+	    std::cout<<GridLogMessage << "qr_decomp "<< ip << " "<< eval2[ip] << std::endl;
+	    qr_decomp(eval,lme,Nm,Nm,Qt,eval2[ip],k1,Nm);
+	    
+	  }
+	  t1=usecond()/1e6;
+	  std::cout<<GridLogMessage <<"IRL::qr_decomp: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
+	  assert(k2<Nm);
+	  
 
-	assert(k2<Nm);
-	assert(k1>0);
-	evec.rotate(Qt,k1-1,k2+1,0,Nm,Nm,evec_offset);
-
-	t1=usecond()/1e6;
-	std::cout<<GridLogMessage <<"IRL::QR rotation: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
-	fflush(stdout);
-
+	  assert(k2<Nm);
+	  assert(k1>0);
+	  evec.rotate(Qt,k1-1,k2+1,0,Nm,Nm,evec_offset);
+	  
+	  t1=usecond()/1e6;
+	  std::cout<<GridLogMessage <<"IRL::QR rotation: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
+	  fflush(stdout);
+	  
 	  // Compressed vector f and beta(k2)
 	  f *= Qt[Nm-1+Nm*(k2-1)];
 	  f += lme[k2-1] * evec.get(k2 + evec_offset);
 	  beta_k = norm2(f);
 	  beta_k = sqrt(beta_k);
 	  std::cout<<GridLogMessage<<" beta(k) = "<<beta_k<<std::endl;
-
+	  
 	  RealD betar = 1.0/beta_k;
 	  evec.put(k2 + evec_offset, betar * f);
 	  lme[k2-1] = beta_k;
-
+	  
 	  // Convergence test
 	  for(int k=0; k<Nm; ++k){    
 	    eval2[k] = eval[k];
@@ -1752,102 +1732,107 @@ until convergence
 	  }
 	  setUnit_Qt(Nm,Qt);
 	  diagonalize(eval2,lme2,Nk,Nm,Qt,grid);
-	t1=usecond()/1e6;
-	std::cout<<GridLogMessage <<"IRL::diagonalize: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
+	  t1=usecond()/1e6;
+	  std::cout<<GridLogMessage <<"IRL::diagonalize: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
 	  
-
-	Nconv = 0;
-
-
-	std::cout << GridLogMessage << "Rotation to test convergence " << std::endl;
-
-	{
-	  Field ev0_orig(grid);
-	  ev0_orig = evec.get(0 + evec_offset);
 	  
-	  evec.rotate(Qt,0,Nk,0,Nk,Nm,evec_offset);
+	  Nconv = 0;
 	  
-	  {
-	    std::cout << GridLogMessage << "Test convergence" << std::endl;
-	    Field B(grid);
+	  if (iter >= Nminres) {
+	    std::cout << GridLogMessage << "Rotation to test convergence " << std::endl;
 	    
-	    for(int j = 0; j<Nk; ++j){
-	      B=evec.get(j + evec_offset);
-	      B.checkerboard = evec.get(0 + evec_offset).checkerboard;
-	      //std::cout << GridLogMessage << "Checkerboard: " << B.checkerboard << " norm2 = " << norm2(B) << std::endl;
-
-	      /*{
-		auto res = B._odata[0];
-		std::cout << GridLogMessage << " ev = " << res << std::endl;
-		}*/
-	      Field tmp(B);
-	      _proj(B,v);
-	      if (!test_conv_poly)
-		_Linop.HermOp(v,tmp);
-	      else
-		_poly(_Linop,v,tmp);      // 3. wk:=Avk−βkv_{k−1}
-	      _proj(tmp,v);
+	    FieldHP ev0_orig(grid);
+	    ev0_orig = evec.get(0 + evec_offset);
+	    
+	    evec.rotate(Qt,0,Nk,0,Nk,Nm,evec_offset);
+	    
+	    {
+	      std::cout << GridLogMessage << "Test convergence" << std::endl;
+	      FieldHP B(grid);
 	      
-	      RealD vnum = real(innerProduct(B,v)); // HermOp.
-	      RealD vden = norm2(B);
-	      RealD vv0 = norm2(v);
-	      eval2[j] = vnum/vden;
-	      v -= eval2[j]*B;
-	      RealD vv = norm2(v);
+	      for(int j = 0; j<Nk; ++j){
+		B=evec.get(j + evec_offset);
+		B.checkerboard = evec.get(0 + evec_offset).checkerboard;
+		//std::cout << GridLogMessage << "Checkerboard: " << B.checkerboard << " norm2 = " << norm2(B) << std::endl;
+		
+		/*{
+		  auto res = B._odata[0];
+		  std::cout << GridLogMessage << " ev = " << res << std::endl;
+		  }*/
+		FieldHP tmp(B);
+		Field   tmpLP(evec._v[0]._grid);
+		Field   vLP(tmpLP);
+		_proj(B,v);
+		precisionChange(vLP,v);
+		if (!test_conv_poly)
+		  _Linop.HermOp(vLP,tmpLP);
+		else
+		  _poly(_Linop,vLP,tmpLP);      // 3. wk:=Avk−βkv_{k−1}
+		precisionChange(tmp,tmpLP);
+		_proj(tmp,v);
+		
+		RealD vnum = real(innerProduct(B,v)); // HermOp.
+		RealD vden = norm2(B);
+		RealD vv0 = norm2(v);
+		eval2[j] = vnum/vden;
+		v -= eval2[j]*B;
+		RealD vv = norm2(v) / ::pow(eval2[j],2.0);
+		
+		std::cout.precision(13);
+		std::cout<<GridLogMessage << "[" << std::setw(3)<< std::setiosflags(std::ios_base::right) <<j<<"] "
+			 <<"eval = "<<std::setw(25)<< std::setiosflags(std::ios_base::left)<< eval2[j]
+			 <<" |H B[i] - eval[i]B[i]|^2 / eval[i]^2 "<< std::setw(25)<< std::setiosflags(std::ios_base::right)<< vv
+			 <<" "<< vnum/(sqrt(vden)*sqrt(vv0))
+			 << " norm(B["<<j<<"])="<< vden <<std::endl;
+		
+		// change the criteria as evals are supposed to be sorted, all evals smaller(larger) than Nstop should have converged
+		if((vv<eresid*eresid) && (j == Nconv) ){
+		  Iconv[Nconv] = j;
+		  ++Nconv;
+		}
+	      }
 	      
-	      std::cout.precision(13);
-	      std::cout<<GridLogMessage << "[" << std::setw(3)<< std::setiosflags(std::ios_base::right) <<j<<"] "
-		       <<"eval = "<<std::setw(25)<< std::setiosflags(std::ios_base::left)<< eval2[j]
-		       <<"|H B[i] - eval[i]B[i]|^2 "<< std::setw(25)<< std::setiosflags(std::ios_base::right)<< vv
-		       <<" "<< vnum/(sqrt(vden)*sqrt(vv0))
-		       << " norm(B["<<j<<"])="<< vden <<std::endl;
+	      // test if we converged, if so, terminate
+	      t1=usecond()/1e6;
+	      std::cout<<GridLogMessage <<"IRL::convergence testing: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
 	      
-	      // change the criteria as evals are supposed to be sorted, all evals smaller(larger) than Nstop should have converged
-	      if((vv<eresid*eresid) && (j == Nconv) ){
-		Iconv[Nconv] = j;
-		++Nconv;
+	      std::cout<<GridLogMessage<<" #modes converged: "<<Nconv<<std::endl;
+	      
+	      if( Nconv>=Nstop ){
+		goto converged;
+	      }
+	      
+	      std::cout << GridLogMessage << "Rotate back" << std::endl;
+	      //B[j] +=Qt[k+_Nm*j] * _v[k]._odata[ss];
+	      {
+		Eigen::MatrixXd qm = Eigen::MatrixXd::Zero(Nk,Nk);
+		for (int k=0;k<Nk;k++)
+		  for (int j=0;j<Nk;j++)
+		    qm(j,k) = Qt[k+Nm*j];
+		GridStopWatch timeInv;
+		timeInv.Start();
+		Eigen::MatrixXd qmI = qm.inverse();
+		timeInv.Stop();
+		DenseVector<RealD> QtI(Nm*Nm);
+		for (int k=0;k<Nk;k++)
+		  for (int j=0;j<Nk;j++)
+		    QtI[k+Nm*j] = qmI(j,k);
+		
+		RealD res_check_rotate_inverse = (qm*qmI - Eigen::MatrixXd::Identity(Nk,Nk)).norm(); // sqrt( |X|^2 )
+		assert(res_check_rotate_inverse < 1e-7);
+		evec.rotate(QtI,0,Nk,0,Nk,Nm,evec_offset);
+		
+		axpy(ev0_orig,-1.0,evec.get(0 + evec_offset),ev0_orig);
+		std::cout << GridLogMessage << "Rotation done (in " << timeInv.Elapsed() << " = " << timeInv.useconds() << " us" <<
+		  ", error = " << res_check_rotate_inverse << 
+		  "); | evec[0] - evec[0]_orig | = " << ::sqrt(norm2(ev0_orig)) << std::endl;
 	      }
 	    }
-	    
-	    // test if we converged, if so, terminate
-	    t1=usecond()/1e6;
-	    std::cout<<GridLogMessage <<"IRL::convergence testing: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
-	    
-	    std::cout<<GridLogMessage<<" #modes converged: "<<Nconv<<std::endl;
-	    
-	    if( Nconv>=Nstop ){
-	      goto converged;
-	    }
-	    
-	    std::cout << GridLogMessage << "Rotate back" << std::endl;
-	    //B[j] +=Qt[k+_Nm*j] * _v[k]._odata[ss];
-	    {
-	      Eigen::MatrixXd qm = Eigen::MatrixXd::Zero(Nk,Nk);
-	      for (int k=0;k<Nk;k++)
-		for (int j=0;j<Nk;j++)
-		  qm(j,k) = Qt[k+Nm*j];
-	      GridStopWatch timeInv;
-	      timeInv.Start();
-	      Eigen::MatrixXd qmI = qm.inverse();
-	      timeInv.Stop();
-	      DenseVector<RealD> QtI(Nm*Nm);
-	      for (int k=0;k<Nk;k++)
-		for (int j=0;j<Nk;j++)
-		  QtI[k+Nm*j] = qmI(j,k);
-	      
-	      RealD res_check_rotate_inverse = (qm*qmI - Eigen::MatrixXd::Identity(Nk,Nk)).norm(); // sqrt( |X|^2 )
-	      assert(res_check_rotate_inverse < 1e-7);
-	      evec.rotate(QtI,0,Nk,0,Nk,Nm,evec_offset);
-	      
-	      axpy(ev0_orig,-1.0,evec.get(0 + evec_offset),ev0_orig);
-	      std::cout << GridLogMessage << "Rotation done (in " << timeInv.Elapsed() << " = " << timeInv.useconds() << " us" <<
-		", error = " << res_check_rotate_inverse << 
-		"); | evec[0] - evec[0]_orig | = " << ::sqrt(norm2(ev0_orig)) << std::endl;
-	    }
-	  }
+	  } else {
+	    std::cout << GridLogMessage << "iter < Nminres: do not yet test for convergence\n";
+	  } // end of iter loop
 	}
-	} // end of iter loop
-	
+
 	std::cout<<GridLogMessage<<"\n NOT converged.\n";
 	abort();
 	
@@ -1859,7 +1844,7 @@ until convergence
        for(int i=0; i<Nconv; ++i)
          //eval[i] = eval2[Iconv[i]];
 	 eval[i] = eval2[i]; // for now just take the lowest Nconv, should be fine the way Lanc converges
-
+       
        {
 	 
 	 // test
@@ -1867,7 +1852,7 @@ until convergence
 	   std::cout<<GridLogMessage << " |e[" << j << "]|^2 = " << norm2(evec.get(j + evec_offset)) << std::endl;
 	 }
        }
-
+       
        //_sort.push(eval,evec,Nconv);
        //evec.sort(eval,Nconv);
        
@@ -1875,563 +1860,10 @@ until convergence
        std::cout<<GridLogMessage << " -- Iterations  = "<< Nconv  << "\n";
        std::cout<<GridLogMessage << " -- beta(k)     = "<< beta_k << "\n";
        std::cout<<GridLogMessage << " -- Nconv       = "<< Nconv  << "\n";
-     }
-
-    /////////////////////////////////////////////////
-    // Adapted from Rudy's lanczos factor routine
-    /////////////////////////////////////////////////
-    int Lanczos_Factor(int start, int end,  int cont,
-		       DenseVector<Field> & bq, 
-		       Field &bf,
-		       DenseMatrix<RealD> &H){
-      
-      GridBase *grid = bq[0]._grid;
-
-      RealD beta;  
-      RealD sqbt;  
-      RealD alpha;
-
-      for(int i=start;i<Nm;i++){
-	for(int j=start;j<Nm;j++){
-	  H[i][j]=0.0;
-	}
-      }
-
-      std::cout<<GridLogMessage<<"Lanczos_Factor start/end " <<start <<"/"<<end<<std::endl;
-
-      // Starting from scratch, bq[0] contains a random vector and |bq[0]| = 1
-      int first;
-      if(start == 0){
-
-	std::cout<<GridLogMessage << "start == 0\n"; //TESTING
-
-	_poly(_Linop,bq[0],bf);
-
-	alpha = real(innerProduct(bq[0],bf));//alpha =  bq[0]^dag A bq[0]
-
-	std::cout<<GridLogMessage << "alpha = " << alpha << std::endl;
-	
-	bf = bf - alpha * bq[0];  //bf =  A bq[0] - alpha bq[0]
-
-	H[0][0]=alpha;
-
-	std::cout<<GridLogMessage << "Set H(0,0) to " << H[0][0] << std::endl;
-
-	first = 1;
-
-      } else {
-
-	first = start;
-
-      }
-
-      // I think start==0 and cont==zero are the same. Test this
-      // If so I can drop "cont" parameter?
-      if( cont ) assert(start!=0);
-
-      if( start==0 ) assert(cont!=0);
-
-      if( cont){
-
-	beta = 0;sqbt = 0;
-
-	std::cout<<GridLogMessage << "cont is true so setting beta to zero\n";
-
-      }	else {
-
-	beta = norm2(bf);
-	sqbt = sqrt(beta);
-
-	std::cout<<GridLogMessage << "beta = " << beta << std::endl;
-      }
-
-      for(int j=first;j<end;j++){
-
-	std::cout<<GridLogMessage << "Factor j " << j <<std::endl;
-
-	if(cont){ // switches to factoring; understand start!=0 and initial bf value is right.
-	  bq[j] = bf; cont = false;
-	}else{
-	  bq[j] = (1.0/sqbt)*bf ;
-
-	  H[j][j-1]=H[j-1][j] = sqbt;
-	}
-
-	_poly(_Linop,bq[j],bf);
-
-	bf = bf - (1.0/sqbt)*bq[j-1]; 	       //bf = A bq[j] - beta bq[j-1] // PAB this comment was incorrect in beta term??
-
-	alpha = real(innerProduct(bq[j],bf));  //alpha = bq[j]^dag A bq[j]
-
-	bf = bf - alpha*bq[j];                 //bf = A bq[j] - beta bq[j-1] - alpha bq[j]
-	RealD fnorm = norm2(bf);
-
-	RealD bck = sqrt( real( conjugate(alpha)*alpha ) + beta );
-
-	beta = fnorm;
-	sqbt = sqrt(beta);
-	std::cout<<GridLogMessage << "alpha = " << alpha << " fnorm = " << fnorm << '\n';
-
-	///Iterative refinement of orthogonality V = [ bq[0]  bq[1]  ...  bq[M] ]
-	int re = 0;
-	// FIXME undefined params; how set in Rudy's code
-	int ref =0;
-	Real rho = 1.0e-8;
-
-	while( re == ref || (sqbt < rho * bck && re < 5) ){
-
-	  Field tmp2(grid);
-	  Field tmp1(grid);
-
-	  //bex = V^dag bf
-	  DenseVector<ComplexD> bex(j+1);
-	  for(int k=0;k<j+1;k++){
-	    bex[k] = innerProduct(bq[k],bf);
-	  }
-	  
-	  zero_fermion(tmp2);
-	  //tmp2 = V s
-	  for(int l=0;l<j+1;l++){
-	    RealD nrm = norm2(bq[l]);
-	    axpy(tmp1,0.0,bq[l],bq[l]); scale(tmp1,bex[l]); 	//tmp1 = V[j] bex[j]
-	    axpy(tmp2,1.0,tmp2,tmp1);					//tmp2 += V[j] bex[j]
-	  }
-
-	  //bf = bf - V V^dag bf.   Subtracting off any component in span { V[j] } 
-	  RealD btc = axpy_norm(bf,-1.0,tmp2,bf);
-	  alpha = alpha + real(bex[j]);	      sqbt = sqrt(real(btc));	      
-	  // FIXME is alpha real in RUDY's code?
-	  RealD nmbex = 0;for(int k=0;k<j+1;k++){nmbex = nmbex + real( conjugate(bex[k])*bex[k]  );}
-	  bck = sqrt( nmbex );
-	  re++;
-	}
-	std::cout<<GridLogMessage << "Iteratively refined orthogonality, changes alpha\n";
-	if(re > 1) std::cout<<GridLogMessage << "orthagonality refined " << re << " times" <<std::endl;
-	H[j][j]=alpha;
-      }
-
-      return end;
-    }
-
-    void EigenSort(DenseVector<double> evals,
-		   DenseVector<Field>  evecs){
-      int N= evals.size();
-      _sort.push(evals,evecs, evals.size(),N);
-    }
-
-    void ImplicitRestart(int TM, DenseVector<RealD> &evals,  DenseVector<DenseVector<RealD> > &evecs, DenseVector<Field> &bq, Field &bf, int cont)
-    {
-      std::cout<<GridLogMessage << "ImplicitRestart begin. Eigensort starting\n";
-
-      DenseMatrix<RealD> H; Resize(H,Nm,Nm);
-
-#ifndef USE_LAPACK
-      EigenSort(evals, evecs);
-#endif
-
-      ///Assign shifts
-      int K=Nk;
-      int M=Nm;
-      int P=Np;
-      int converged=0;
-      if(K - converged < 4) P = (M - K-1); //one
-      //      DenseVector<RealD> shifts(P + shift_extra.size());
-      DenseVector<RealD> shifts(P);
-      for(int k = 0; k < P; ++k)
-	shifts[k] = evals[k]; 
-
-      /// Shift to form a new H and q
-      DenseMatrix<RealD> Q; Resize(Q,TM,TM);
-      Unity(Q);
-      Shift(Q, shifts); // H is implicitly passed in in Rudy's Shift routine
-
-      int ff = K;
-
-      /// Shifted H defines a new K step Arnoldi factorization
-      RealD  beta = H[ff][ff-1]; 
-      RealD  sig  = Q[TM - 1][ff - 1];
-      std::cout<<GridLogMessage << "beta = " << beta << " sig = " << real(sig) <<std::endl;
-
-      std::cout<<GridLogMessage << "TM = " << TM << " ";
-      std::cout<<GridLogMessage << norm2(bq[0]) << " -- before" <<std::endl;
-
-      /// q -> q Q
-      times_real(bq, Q, TM);
-
-      std::cout<<GridLogMessage << norm2(bq[0]) << " -- after " << ff <<std::endl;
-      bf =  beta* bq[ff] + sig* bf;
-
-      /// Do the rest of the factorization
-      ff = Lanczos_Factor(ff, M,cont,bq,bf,H);
-      
-      if(ff < M)
-	Abort(ff, evals, evecs);
-    }
-
-///Run the Eigensolver
-    void Run(int cont, DenseVector<Field> &bq, Field &bf, DenseVector<DenseVector<RealD> > & evecs,DenseVector<RealD> &evals)
-    {
-      init();
-
-      int M=Nm;
-
-      DenseMatrix<RealD> H; Resize(H,Nm,Nm);
-      Resize(evals,Nm);
-      Resize(evecs,Nm);
-
-      int ff = Lanczos_Factor(0, M, cont, bq,bf,H); // 0--M to begin with
-
-      if(ff < M) {
-	std::cout<<GridLogMessage << "Krylov: aborting ff "<<ff <<" "<<M<<std::endl;
-	abort(); // Why would this happen?
-      }
-
-      int itcount = 0;
-      bool stop = false;
-
-      for(int it = 0; it < Niter && (converged < Nk); ++it) {
-
-	std::cout<<GridLogMessage << "Krylov: Iteration --> " << it << std::endl;
-	int lock_num = lock ? converged : 0;
-	DenseVector<RealD> tevals(M - lock_num );
-	DenseMatrix<RealD> tevecs; Resize(tevecs,M - lock_num,M - lock_num);
-	  
-	//check residual of polynominal 
-	TestConv(H,M, tevals, tevecs);
-
-	if(converged >= Nk)
-	    break;
-
-	ImplicitRestart(ff, tevals,tevecs,H);
-      }
-      Wilkinson<RealD>(H, evals, evecs, small); 
-      //      Check();
-
-      std::cout<<GridLogMessage << "Done  "<<std::endl;
-
-    }
-
-   ///H - shift I = QR; H = Q* H Q
-    void Shift(DenseMatrix<RealD> & H,DenseMatrix<RealD> &Q, DenseVector<RealD> shifts) {
-      
-      int P; Size(shifts,P);
-      int M; SizeSquare(Q,M);
-
-      Unity(Q);
-
-      int lock_num = lock ? converged : 0;
-
-      RealD t_Househoulder_vector(0.0);
-      RealD t_Househoulder_mult(0.0);
-
-      for(int i=0;i<P;i++){
-
-	RealD x, y, z;
-	DenseVector<RealD> ck(3), v(3);
-	  
-	x = H[lock_num+0][lock_num+0]-shifts[i];
-	y = H[lock_num+1][lock_num+0];
-	ck[0] = x; ck[1] = y; ck[2] = 0; 
-
-	normalise(ck);	///Normalization cancels in PHP anyway
-	RealD beta;
-
-	Householder_vector<RealD>(ck, 0, 2, v, beta);
-	Householder_mult<RealD>(H,v,beta,0,lock_num+0,lock_num+2,0);
-	Householder_mult<RealD>(H,v,beta,0,lock_num+0,lock_num+2,1);
-	///Accumulate eigenvector
-	Householder_mult<RealD>(Q,v,beta,0,lock_num+0,lock_num+2,1);
-	  
-	int sw = 0;
-	for(int k=lock_num+0;k<M-2;k++){
-
-	  x = H[k+1][k]; 
-	  y = H[k+2][k]; 
-	  z = (RealD)0.0;
-	  if(k+3 <= M-1){
-	    z = H[k+3][k];
-	  }else{
-	    sw = 1; v[2] = 0.0;
-	  }
-
-	  ck[0] = x; ck[1] = y; ck[2] = z;
-
-	  normalise(ck);
-
-	  Householder_vector<RealD>(ck, 0, 2-sw, v, beta);
-	  Householder_mult<RealD>(H,v, beta,0,k+1,k+3-sw,0);
-	  Householder_mult<RealD>(H,v, beta,0,k+1,k+3-sw,1);
-	  ///Accumulate eigenvector
-	  Householder_mult<RealD>(Q,v, beta,0,k+1,k+3-sw,1);
-	}
-      }
-    }
-
-    void TestConv(DenseMatrix<RealD> & H,int SS, 
-		  DenseVector<Field> &bq, Field &bf,
-		  DenseVector<RealD> &tevals, DenseVector<DenseVector<RealD> > &tevecs, 
-		  int lock, int converged)
-    {
-      std::cout<<GridLogMessage << "Converged " << converged << " so far." << std::endl;
-      int lock_num = lock ? converged : 0;
-      int M = Nm;
-
-      ///Active Factorization
-      DenseMatrix<RealD> AH; Resize(AH,SS - lock_num,SS - lock_num );
-
-      AH = GetSubMtx(H,lock_num, SS, lock_num, SS);
-
-      int NN=tevals.size();
-      int AHsize=SS-lock_num;
-
-      RealD small=1.0e-16;
-      Wilkinson<RealD>(AH, tevals, tevecs, small);
-
-#ifndef USE_LAPACK
-      EigenSort(tevals, tevecs);
-#endif
-
-      RealD resid_nrm=  norm2(bf);
-
-      if(!lock) converged = 0;
-#if 0
-      for(int i = SS - lock_num - 1; i >= SS - Nk && i >= 0; --i){
-
-	RealD diff = 0;
-	diff = abs( tevecs[i][Nm - 1 - lock_num] ) * resid_nrm;
-
-	std::cout<<GridLogMessage << "residual estimate " << SS-1-i << " " << diff << " of (" << tevals[i] << ")" << std::endl;
-
-	if(diff < converged) {
-
-	  if(lock) {
-	    
-	    DenseMatrix<RealD> Q; Resize(Q,M,M);
-	    bool herm = true; 
-
-	    Lock(H, Q, tevals[i], converged, small, SS, herm);
-
-	    times_real(bq, Q, bq.size());
-	    bf = Q[M - 1][M - 1]* bf;
-	    lock_num++;
-	  }
-	  converged++;
-	  std::cout<<GridLogMessage << " converged on eval " << converged << " of " << Nk << std::endl;
-	} else {
-	  break;
-	}
       }
 #endif
-      std::cout<<GridLogMessage << "Got " << converged << " so far " <<std::endl;	
-    }
 
-    ///Check
-    void Check(DenseVector<RealD> &evals,
-	       DenseVector<DenseVector<RealD> > &evecs) {
-
-      DenseVector<RealD> goodval(this->get);
-
-#ifndef USE_LAPACK
-      EigenSort(evals,evecs);
-#endif
-
-      int NM = Nm;
-
-      DenseVector< DenseVector<RealD> > V; Size(V,NM);
-      DenseVector<RealD> QZ(NM*NM);
-
-      for(int i = 0; i < NM; i++){
-	for(int j = 0; j < NM; j++){
-	  // evecs[i][j];
-	}
-      }
-    }
-
-
-/**
-   There is some matrix Q such that for any vector y
-   Q.e_1 = y and Q is unitary.
-**/
-  template<class T>
-  static T orthQ(DenseMatrix<T> &Q, DenseVector<T> y){
-    int N = y.size();	//Matrix Size
-    Fill(Q,0.0);
-    T tau;
-    for(int i=0;i<N;i++){
-      Q[i][0]=y[i];
-    }
-    T sig = conj(y[0])*y[0];
-    T tau0 = abs(sqrt(sig));
-    
-    for(int j=1;j<N;j++){
-      sig += conj(y[j])*y[j]; 
-      tau = abs(sqrt(sig) ); 	
-
-      if(abs(tau0) > 0.0){
-	
-	T gam = conj( (y[j]/tau)/tau0 );
-	for(int k=0;k<=j-1;k++){  
-	  Q[k][j]=-gam*y[k];
-	}
-	Q[j][j]=tau0/tau;
-      } else {
-	Q[j-1][j]=1.0;
-      }
-      tau0 = tau;
-    }
-    return tau;
-  }
-
-/**
-	There is some matrix Q such that for any vector y
-	Q.e_k = y and Q is unitary.
-**/
-  template< class T>
-  static T orthU(DenseMatrix<T> &Q, DenseVector<T> y){
-    T tau = orthQ(Q,y);
-    SL(Q);
-    return tau;
-  }
-
-
-/**
-	Wind up with a matrix with the first con rows untouched
-
-say con = 2
-	Q is such that Qdag H Q has {x, x, val, 0, 0, 0, 0, ...} as 1st colum
-	and the matrix is upper hessenberg
-	and with f and Q appropriately modidied with Q is the arnoldi factorization
-
-**/
-
-template<class T>
-static void Lock(DenseMatrix<T> &H, 	///Hess mtx	
-		 DenseMatrix<T> &Q, 	///Lock Transform
-		 T val, 		///value to be locked
-		 int con, 	///number already locked
-		 RealD small,
-		 int dfg,
-		 bool herm)
-{	
-
-
-  //ForceTridiagonal(H);
-
-  int M = H.dim;
-  DenseVector<T> vec; Resize(vec,M-con);
-
-  DenseMatrix<T> AH; Resize(AH,M-con,M-con);
-  AH = GetSubMtx(H,con, M, con, M);
-
-  DenseMatrix<T> QQ; Resize(QQ,M-con,M-con);
-
-  Unity(Q);   Unity(QQ);
-  
-  DenseVector<T> evals; Resize(evals,M-con);
-  DenseMatrix<T> evecs; Resize(evecs,M-con,M-con);
-
-  Wilkinson<T>(AH, evals, evecs, small);
-
-  int k=0;
-  RealD cold = abs( val - evals[k]); 
-  for(int i=1;i<M-con;i++){
-    RealD cnew = abs( val - evals[i]);
-    if( cnew < cold ){k = i; cold = cnew;}
-  }
-  vec = evecs[k];
-
-  ComplexD tau;
-  orthQ(QQ,vec);
-  //orthQM(QQ,AH,vec);
-
-  AH = Hermitian(QQ)*AH;
-  AH = AH*QQ;
-	
-
-  for(int i=con;i<M;i++){
-    for(int j=con;j<M;j++){
-      Q[i][j]=QQ[i-con][j-con];
-      H[i][j]=AH[i-con][j-con];
-    }
-  }
-
-  for(int j = M-1; j>con+2; j--){
-
-    DenseMatrix<T> U; Resize(U,j-1-con,j-1-con);
-    DenseVector<T> z; Resize(z,j-1-con); 
-    T nm = norm(z); 
-    for(int k = con+0;k<j-1;k++){
-      z[k-con] = conj( H(j,k+1) );
-    }
-    normalise(z);
-
-    RealD tmp = 0;
-    for(int i=0;i<z.size()-1;i++){tmp = tmp + abs(z[i]);}
-
-    if(tmp < small/( (RealD)z.size()-1.0) ){ continue;}	
-
-    tau = orthU(U,z);
-
-    DenseMatrix<T> Hb; Resize(Hb,j-1-con,M);	
-	
-    for(int a = 0;a<M;a++){
-      for(int b = 0;b<j-1-con;b++){
-	T sum = 0;
-	for(int c = 0;c<j-1-con;c++){
-	  sum += H[a][con+1+c]*U[c][b];
-	}//sum += H(a,con+1+c)*U(c,b);}
-	Hb[b][a] = sum;
-      }
-    }
-	
-    for(int k=con+1;k<j;k++){
-      for(int l=0;l<M;l++){
-	H[l][k] = Hb[k-1-con][l];
-      }
-    }//H(Hb[k-1-con][l] , l,k);}}
-
-    DenseMatrix<T> Qb; Resize(Qb,M,M);	
-	
-    for(int a = 0;a<M;a++){
-      for(int b = 0;b<j-1-con;b++){
-	T sum = 0;
-	for(int c = 0;c<j-1-con;c++){
-	  sum += Q[a][con+1+c]*U[c][b];
-	}//sum += Q(a,con+1+c)*U(c,b);}
-	Qb[b][a] = sum;
-      }
-    }
-	
-    for(int k=con+1;k<j;k++){
-      for(int l=0;l<M;l++){
-	Q[l][k] = Qb[k-1-con][l];
-      }
-    }//Q(Qb[k-1-con][l] , l,k);}}
-
-    DenseMatrix<T> Hc; Resize(Hc,M,M);	
-	
-    for(int a = 0;a<j-1-con;a++){
-      for(int b = 0;b<M;b++){
-	T sum = 0;
-	for(int c = 0;c<j-1-con;c++){
-	  sum += conj( U[c][a] )*H[con+1+c][b];
-	}//sum += conj( U(c,a) )*H(con+1+c,b);}
-	Hc[b][a] = sum;
-      }
-    }
-
-    for(int k=0;k<M;k++){
-      for(int l=con+1;l<j;l++){
-	H[l][k] = Hc[k][l-1-con];
-      }
-    }//H(Hc[k][l-1-con] , l,k);}}
-
-  }
-}
-#endif
-
-
- };
+    };
 
 }
 #endif

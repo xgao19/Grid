@@ -146,34 +146,133 @@ public:
 
     }
 
-    int block_site_to_o_site(const std::vector<int>& x0, int i) {
-      std::vector<int> coor;  coor.resize(_nd);
+    void block_site_to_o_coor(const std::vector<int>& x0, std::vector<int>& coor, int i) {
       Lexicographic::CoorFromIndex(coor,i,_bs_cb);
       for (int j=0;j<_nd;j++)
 	coor[j] += x0[j];
-      //std::cout << GridLogMessage << "Coor: " << coor << std::endl;
-      
+    }
+
+    int block_site_to_o_site(const std::vector<int>& x0, int i) {
+      std::vector<int> coor;  coor.resize(_nd);
+      block_site_to_o_coor(x0,coor,i);
       Lexicographic::IndexFromCoor(coor,i,_l_cb_o);
-      
-      //std::cout << GridLogMessage << "IDX: " << i << std::endl;
       return i;
     }
 
+    template<class TX,class TY>
+      Coeff_t sp_lane(const iScalar<TX>& x,int ix,const iScalar<TY>& y,int iy) {
+      return sp_lane(x._internal,ix,y._internal,iy);
+    }
+
+    template<class TX,class TY,int N>
+      Coeff_t sp_lane(const iVector<TX,N>& x,int ix,const iVector<TY,N>& y,int iy) {
+      Coeff_t r = 0.0;
+      for (int i=0;i<N;i++)
+	r += sp_lane(x._internal[i],ix,y._internal[i],iy);
+      return r;
+    }
+
+    template<class TX,class TY,class SX,class SY>
+      Coeff_t sp_lane(const Grid_simd<TX,SX>& x,int ix,const Grid_simd<TY,SY>& y,int iy) {
+      return conjugate(((TX*)&x)[ix])*((TY*)&y)[iy];
+    }
+
+    template<class TR,class TX,class TY>
+      void caxpy_lane(iScalar<TR>& r,int ir,Coeff_t a,const iScalar<TX>& x,int ix,const iScalar<TY>& y,int iy) {
+      caxpy_lane(r._internal,ir,a,x._internal,ix,y._internal,iy);
+    }
+
+    template<class TR,class TX,class TY,int N>
+      void caxpy_lane(iVector<TR,N>& r,int ir,Coeff_t a,const iVector<TX,N>& x,int ix,const iVector<TY,N>& y,int iy) {
+      for (int i=0;i<N;i++)
+	caxpy_lane(r._internal[i],ir,a,x._internal[i],ix,y._internal[i],iy);
+    }
+
+    template<class TR,class TX,class TY,class SX,class SY,class SR>
+      void caxpy_lane(Grid_simd<TR,SR>& r,int ir,Coeff_t a,const Grid_simd<TX,SX>& x,int ix,const Grid_simd<TY,SY>& y,int iy) {
+      ((TR*)&r)[ir] = a*((TX*)&x)[ix] + ((TY*)&y)[iy];
+    }
+
+    template<typename TR,typename TX,typename TY>
+    void block_caxpy_mixed(int b, Lattice<TR>& ret, const vCoeff_t& a, const Lattice<TX>& x, const Lattice<TY>& y) {
+
+
+      std::vector<int> x0;
+      block_to_coor(b,x0);
+
+      GridBase* xg = x._grid;
+      GridBase* yg = y._grid;
+      GridBase* rg = ret._grid;
+
+      int ndim = xg->Nd();
+      int Nsimd = sizeof(vCoeff_t) / sizeof(Coeff_t);
+
+      std::vector<int> lcoor; lcoor.resize(ndim);
+      std::vector<int> scoor; scoor.resize(ndim);
+      std::vector<int> ncoor; ncoor.resize(ndim);
+
+      for (int i=0;i<_block_sites;i++) {
+	block_site_to_o_coor(x0,lcoor,i);
+	
+	for (int lane=0;lane<Nsimd;lane++) {
+	  Coeff_t& retlane = ((Coeff_t*)&ret)[lane];
+	  
+	  Lexicographic::CoorFromIndex(scoor,lane,_grid->_simd_layout);
+	  
+	  for (int j=0;j<ndim;j++)
+	    ncoor[j] = lcoor[j] + _bs_cb[j]*_nb_o[j]*scoor[j];
+	  
+	  int ix = xg->iIndex(ncoor);
+	  int iy = yg->iIndex(ncoor);
+	  int ir = rg->iIndex(ncoor);
+	  int ox = xg->oIndex(ncoor);
+	  int oy = yg->oIndex(ncoor);
+	  int o_r = rg->oIndex(ncoor);
+
+	  caxpy_lane(ret._odata[o_r],ir,((Coeff_t*)&a)[lane],x._odata[ox],ix,y._odata[oy],iy);
+	}
+
+      }
+
+    }
+
+    template<typename TX,typename TY>
     vCoeff_t block_sp_mixed(int b, const Lattice<TX>& x, const Lattice<TY>& y) {
 
       std::vector<int> x0;
       block_to_coor(b,x0);
 
+      GridBase* xg = x._grid;
+      GridBase* yg = y._grid;
+
+      int ndim = xg->Nd();
       int Nsimd = sizeof(vCoeff_t) / sizeof(Coeff_t);
-      std::vector<Coeff_t> ret;
-      for (int i=0;i<Nsimd;i++)
-	ret[i] = 0.0;
-      for (int i=0;i<_block_sites;i++) { // only odd sites
-	int ss = block_site_to_o_site(x0,i);
 
-	abort(0);
+      vCoeff_t ret = 0.0;
 
-	// convert ss to Nsimd positions, get elements for those positions from x and y ...
+      std::vector<int> lcoor; lcoor.resize(ndim);
+      std::vector<int> scoor; scoor.resize(ndim);
+      std::vector<int> ncoor; ncoor.resize(ndim);
+
+      for (int i=0;i<_block_sites;i++) {
+	block_site_to_o_coor(x0,lcoor,i);
+	
+	for (int lane=0;lane<Nsimd;lane++) {
+	  Coeff_t& retlane = ((Coeff_t*)&ret)[lane];
+	  
+	  Lexicographic::CoorFromIndex(scoor,lane,_grid->_simd_layout);
+	  
+	  for (int j=0;j<ndim;j++)
+	    ncoor[j] = lcoor[j] + _bs_cb[j]*_nb_o[j]*scoor[j];
+	  
+	  int ix = xg->iIndex(ncoor);
+	  int iy = yg->iIndex(ncoor);
+	  int ox = xg->oIndex(ncoor);
+	  int oy = yg->oIndex(ncoor);
+
+	  retlane += sp_lane(x._odata[ox],ix,y._odata[oy],iy);
+	}
+
       }
 
       return ret;
@@ -1776,12 +1875,16 @@ until convergence
 		RealD vv0 = norm2(v);
 		eval2[j] = vnum/vden;
 		v -= eval2[j]*B;
-		RealD vv = norm2(v) / ::pow(eval2[j],2.0);
-		
+		RealD vv = norm2(v);
+		std::string xtr;
+		if (test_conv_poly) {
+		  vv /= ::pow(eval2[j],2.0);
+		  xtr = "/ eval[i]^2 ";
+		}
 		std::cout.precision(13);
 		std::cout<<GridLogMessage << "[" << std::setw(3)<< std::setiosflags(std::ios_base::right) <<j<<"] "
 			 <<"eval = "<<std::setw(25)<< std::setiosflags(std::ios_base::left)<< eval2[j]
-			 <<" |H B[i] - eval[i]B[i]|^2 / eval[i]^2 "<< std::setw(25)<< std::setiosflags(std::ios_base::right)<< vv
+			 <<" |H B[i] - eval[i]B[i]|^2 " << xtr << std::setw(25)<< std::setiosflags(std::ios_base::right)<< vv
 			 <<" "<< vnum/(sqrt(vden)*sqrt(vv0))
 			 << " norm(B["<<j<<"])="<< vden <<std::endl;
 		

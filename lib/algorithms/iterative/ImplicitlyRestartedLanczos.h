@@ -159,126 +159,6 @@ public:
       return i;
     }
 
-    template<class TX,class TY>
-      Coeff_t sp_lane(const iScalar<TX>& x,int ix,const iScalar<TY>& y,int iy) {
-      return sp_lane(x._internal,ix,y._internal,iy);
-    }
-
-    template<class TX,class TY,int N>
-      Coeff_t sp_lane(const iVector<TX,N>& x,int ix,const iVector<TY,N>& y,int iy) {
-      Coeff_t r = 0.0;
-      for (int i=0;i<N;i++)
-	r += sp_lane(x._internal[i],ix,y._internal[i],iy);
-      return r;
-    }
-
-    template<class TX,class TY,class SX,class SY>
-      Coeff_t sp_lane(const Grid_simd<TX,SX>& x,int ix,const Grid_simd<TY,SY>& y,int iy) {
-      return conjugate(((TX*)&x)[ix])*((TY*)&y)[iy];
-    }
-
-    template<class TR,class TX,class TY>
-      void caxpy_lane(iScalar<TR>& r,int ir,Coeff_t a,const iScalar<TX>& x,int ix,const iScalar<TY>& y,int iy) {
-      caxpy_lane(r._internal,ir,a,x._internal,ix,y._internal,iy);
-    }
-
-    template<class TR,class TX,class TY,int N>
-      void caxpy_lane(iVector<TR,N>& r,int ir,Coeff_t a,const iVector<TX,N>& x,int ix,const iVector<TY,N>& y,int iy) {
-      for (int i=0;i<N;i++)
-	caxpy_lane(r._internal[i],ir,a,x._internal[i],ix,y._internal[i],iy);
-    }
-
-    template<class TR,class TX,class TY,class SX,class SY,class SR>
-      void caxpy_lane(Grid_simd<TR,SR>& r,int ir,Coeff_t a,const Grid_simd<TX,SX>& x,int ix,const Grid_simd<TY,SY>& y,int iy) {
-      ((TR*)&r)[ir] = a*((TX*)&x)[ix] + ((TY*)&y)[iy];
-    }
-
-    template<typename TR,typename TX,typename TY>
-    void block_caxpy_mixed(int b, Lattice<TR>& ret, const vCoeff_t& a, const Lattice<TX>& x, const Lattice<TY>& y) {
-
-
-      std::vector<int> x0;
-      block_to_coor(b,x0);
-
-      GridBase* xg = x._grid;
-      GridBase* yg = y._grid;
-      GridBase* rg = ret._grid;
-
-      int ndim = xg->Nd();
-      int Nsimd = sizeof(vCoeff_t) / sizeof(Coeff_t);
-
-      std::vector<int> lcoor; lcoor.resize(ndim);
-      std::vector<int> scoor; scoor.resize(ndim);
-      std::vector<int> ncoor; ncoor.resize(ndim);
-
-      for (int i=0;i<_block_sites;i++) {
-	block_site_to_o_coor(x0,lcoor,i);
-	
-	for (int lane=0;lane<Nsimd;lane++) {
-	  Coeff_t& retlane = ((Coeff_t*)&ret)[lane];
-	  
-	  Lexicographic::CoorFromIndex(scoor,lane,_grid->_simd_layout);
-	  
-	  for (int j=0;j<ndim;j++)
-	    ncoor[j] = lcoor[j] + _bs_cb[j]*_nb_o[j]*scoor[j];
-	  
-	  int ix = xg->iIndex(ncoor);
-	  int iy = yg->iIndex(ncoor);
-	  int ir = rg->iIndex(ncoor);
-	  int ox = xg->oIndex(ncoor);
-	  int oy = yg->oIndex(ncoor);
-	  int o_r = rg->oIndex(ncoor);
-
-	  caxpy_lane(ret._odata[o_r],ir,((Coeff_t*)&a)[lane],x._odata[ox],ix,y._odata[oy],iy);
-	}
-
-      }
-
-    }
-
-    template<typename TX,typename TY>
-    vCoeff_t block_sp_mixed(int b, const Lattice<TX>& x, const Lattice<TY>& y) {
-
-      std::vector<int> x0;
-      block_to_coor(b,x0);
-
-      GridBase* xg = x._grid;
-      GridBase* yg = y._grid;
-
-      int ndim = xg->Nd();
-      int Nsimd = sizeof(vCoeff_t) / sizeof(Coeff_t);
-
-      vCoeff_t ret = 0.0;
-
-      std::vector<int> lcoor; lcoor.resize(ndim);
-      std::vector<int> scoor; scoor.resize(ndim);
-      std::vector<int> ncoor; ncoor.resize(ndim);
-
-      for (int i=0;i<_block_sites;i++) {
-	block_site_to_o_coor(x0,lcoor,i);
-	
-	for (int lane=0;lane<Nsimd;lane++) {
-	  Coeff_t& retlane = ((Coeff_t*)&ret)[lane];
-	  
-	  Lexicographic::CoorFromIndex(scoor,lane,_grid->_simd_layout);
-	  
-	  for (int j=0;j<ndim;j++)
-	    ncoor[j] = lcoor[j] + _bs_cb[j]*_nb_o[j]*scoor[j];
-	  
-	  int ix = xg->iIndex(ncoor);
-	  int iy = yg->iIndex(ncoor);
-	  int ox = xg->oIndex(ncoor);
-	  int oy = yg->oIndex(ncoor);
-
-	  retlane += sp_lane(x._odata[ox],ix,y._odata[oy],iy);
-	}
-
-      }
-
-      return ret;
-
-    }
-
     vCoeff_t block_sp(int b, const Field& x, const Field& y) {
 
       std::vector<int> x0;
@@ -364,6 +244,7 @@ class BlockedFieldVector {
   typedef typename vobj::scalar_object sobj;
 
   BlockedGrid<FieldHP> _bgrid;
+  BlockedGrid<Field> _bgridLP;
   
   std::vector<Field> _v; // _Nfull vectors
   std::vector< vCoeffHP_t > _c; 
@@ -373,7 +254,7 @@ class BlockedFieldVector {
   //public:
 
   BlockedFieldVector(int Nm,GridBase* value,GridBase* valueHP,int Nfull,const std::vector<int>& block_size) : 
-  _Nfull(Nfull), _Nm(Nm), _v(Nfull,value), _bgrid(valueHP,block_size), _full_locked(false) {
+  _Nfull(Nfull), _Nm(Nm), _v(Nfull,value), _bgrid(valueHP,block_size), _bgridLP(value,block_size), _full_locked(false) {
 
     std::cout << GridLogMessage << "BlockedFieldVector initialized:\n";
     std::cout << GridLogMessage << " Nm = " << Nm << "\n";
@@ -510,6 +391,16 @@ class BlockedFieldVector {
       axpy(test,-1.0,v,test);
       std::cout << GridLogMessage << "Error of vector: " << norm2(test) << " nrm2 = " << norm2(v) << " vs " << nrm2b << std::endl;
 #endif
+    }
+  }
+
+  void deflate(const std::vector<RealD>& eval,const std::vector<int>& idx,int N,const Field& src_orig,Field& result) {
+    result = zero;
+    Field tmp(result);
+    for (int i=0;i<N;i++) {
+      int j = idx[i];
+      precisionChange(tmp,get(j));
+      axpy(result,TensorRemove(innerProduct(tmp,src_orig)) / eval[j],tmp,result);
     }
   }
 
@@ -1153,6 +1044,8 @@ public:
   }
 
   void operator()(const FieldHP& in, FieldHP& outhp) {
+
+#if 0
     FieldHP tmp(_evec._bgrid._grid);
     tmp = in;
 
@@ -1162,15 +1055,37 @@ public:
     tmp.checkerboard = in.checkerboard;
 
     for (int j=0;j<_evec._Nfull;j++) {
-      //      FieldHP vj(_evec._bgrid._grid);
-      //precisionChange(vj,_evec._v[j]);
+      FieldHP vj(_evec._bgrid._grid);
+      precisionChange(vj,_evec._v[j]);
 
 #pragma omp parallel for
       for (int b=0;b<_evec._bgrid._o_blocks;b++) {
-	_evec._bgrid.block_caxpy_mixed(b,outhp,_evec._bgrid.block_sp_mixed(b,_evec._v[j],tmp),_evec._v[j],outhp);
+	_evec._bgrid.block_caxpy(b,outhp,_evec._bgrid.block_sp(b,vj,tmp),vj,outhp);
       }
 
     }
+#else
+    Field tmp(_evec._bgridLP._grid);
+    precisionChange(tmp,in);
+
+    Field out(_evec._bgridLP._grid);
+    out = zero;
+
+    out.checkerboard = in.checkerboard;
+    tmp.checkerboard = in.checkerboard;
+
+#pragma omp parallel for
+    for (int b=0;b<_evec._bgridLP._o_blocks;b++) {
+      for (int j=0;j<_evec._Nfull;j++) {
+	auto v = _evec._bgridLP.block_sp(b,_evec._v[j],tmp);
+	_evec._bgridLP.block_caxpy(b,out,v,_evec._v[j],out);
+	_evec._bgridLP.block_caxpy(b,tmp,-v,_evec._v[j],tmp);
+      }
+    }
+
+    precisionChange(outhp,out);
+
+#endif
   }
 };
 

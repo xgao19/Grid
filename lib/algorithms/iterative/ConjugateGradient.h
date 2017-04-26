@@ -46,11 +46,18 @@ class ConjugateGradient : public OperatorFunction<Field> {
   RealD Tolerance;
   Integer MaxIterations;
   Integer IterationsToComplete; //Number of iterations the CG took to finish. Filled in upon completion
+
+  std::vector<RealD> ResHistory;
+  bool KeepResHistory;
+
   
-  ConjugateGradient(RealD tol, Integer maxit, bool err_on_no_conv = true)
+ ConjugateGradient(RealD tol, Integer maxit, bool err_on_no_conv = true, 
+		   bool keep_res_history = false)
       : Tolerance(tol),
         MaxIterations(maxit),
-        ErrorOnNoConverge(err_on_no_conv){};
+        ErrorOnNoConverge(err_on_no_conv),
+        KeepResHistory(keep_res_history)
+      {};
 
   void operator()(LinearOperatorBase<Field> &Linop, const Field &src,
                   Field &psi) {
@@ -132,6 +139,10 @@ class ConjugateGradient : public OperatorFunction<Field> {
       LinalgTimer.Stop();
       std::cout << GridLogIterative << "ConjugateGradient: Iteration " << k
                 << " residual " << cp << " target " << rsq << std::endl;
+
+      // Keep history of residuals if requested
+      if (KeepResHistory)
+	ResHistory.push_back(cp);
 
       // Stopping condition
       if (cp <= rsq) {

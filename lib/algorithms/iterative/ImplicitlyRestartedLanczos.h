@@ -56,8 +56,7 @@ void LAPACK_dstegr(char *jobz, char *range, int *n, double *d, double *e,
 
 namespace Grid {
 
-
-  template<typename Field>
+template<typename Field>
 class BlockedGrid {
 public:
   GridBase* _grid;
@@ -229,7 +228,22 @@ public:
     }
 
 };
-  
+
+template<class Field>
+class BlockedField {
+public:
+  typedef typename Field::scalar_type Coeff_t;
+  typedef typename FieldHP::scalar_type CoeffHP_t;
+  typedef typename Field::vector_type vCoeff_t;
+  typedef typename FieldHP::vector_type vCoeffHP_t;
+
+  std::vector< vCoeff_t > _c;
+  Field _f;
+
+  BlockedField(GridBase* value) : _f(value) {
+  }
+};
+
 template<class Field, class FieldHP>
 class BlockedFieldVector {
  public:
@@ -318,8 +332,9 @@ class BlockedFieldVector {
 
   }
 
-  FieldHP get_blocked(int i) {
-    FieldHP ret(_bgrid._grid);
+  BlockedField<FieldHP> get_blocked(int i) {
+
+    BlockedField<FieldHP> ret(_bgrid._grid);
     ret = zero;
     ret.checkerboard = _v[0].checkerboard;
     
@@ -408,6 +423,8 @@ class BlockedFieldVector {
 
     if (!_full_locked) {
 
+      //#define LANC_ORTH_HIGH_PRECISION
+#ifdef LANC_ORTH_HIGH_PRECISION
       for(int j=0; j<k; ++j){
 	FieldHP evec_j(_bgrid._grid);
 	precisionChange(evec_j,_v[j + evec_offset]);
@@ -417,6 +434,16 @@ class BlockedFieldVector {
 	//Coeff_t ip = (Coeff_t)innerProduct(evec_j,w); // are the evecs normalised? ; this assumes so.
 	//w = w - ip * evec_j;
       }
+#else
+      Field w(_v[0]._grid);
+      precisionChange(w,whp);
+      for(int j=0; j<k; ++j){
+	Coeff_t ip = (Coeff_t)innerProduct(_v[j + evec_offset],w);
+	w = w - ip*_v[j + evec_offset];
+      }
+      precisionChange(whp,w);
+      
+#endif
 
     } else {
 

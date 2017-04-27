@@ -58,7 +58,6 @@ template<typename Field>
 class BlockedGrid {
 public:
   GridBase* _grid;
-
   typedef typename Field::scalar_type Coeff_t;
   typedef typename Field::vector_type vCoeff_t;
   
@@ -292,6 +291,11 @@ class BasisFieldVector {
     return _Nm;
   }
 
+  void resize(int n) {
+    _Nm = n;
+    _v.resize(n,_v[0]._grid);
+  }
+
   std::vector<int> getIndex(DenseVector<RealD>& sort_vals) {
 
     std::vector<int> idx(sort_vals.size());
@@ -344,60 +348,45 @@ public:
 
   }
 
-  /*
-  FieldHP get_blocked(int i) {
+  template<typename CoarseField>
+  void coarseToFine(const CoarseField& in, Field& out) {
 
-    FieldHP ret(_bgrid._grid);
-    ret = zero;
-    ret.checkerboard = _v[0].checkerboard;
+    out = zero;
+    out.checkerboard = _evec._v[0].checkerboard;
+
+    int Nbasis = sizeof(in._odata[0]._internal._internal) / sizeof(in._odata[0]._internal._internal[0]);
+    assert(Nbasis == _evec._Nm);
     
-    for (int j=0;j<_Nfull;j++) {
-      FieldHP vj(_bgrid._grid);
-      precisionChange(vj,_v[j]);
+    for (int j=0;j<_evec._Nm;j++) {
 #pragma omp parallel for
       for (int b=0;b<_bgrid._o_blocks;b++)
-	_bgrid.block_caxpy(b,ret,_c[ cidx(i,b,j) ],vj,ret);
+	_bgrid.block_caxpy(b,out,in._odata[b]._internal._internal[j],_evec._v[j],out);
     }
     
-    return ret;
   }
 
-  void put_blocked(int i, const FieldHP& rhs) {
+  template<typename CoarseField>
+  void fineToCoarse(const Field& in, CoarseField& out) {
 
-    FieldHP tmp(_bgrid._grid);
-    tmp = rhs;
+    out = zero;
 
-    for (int j=0;j<_Nfull;j++) {
-      FieldHP vj(_bgrid._grid);
-      precisionChange(vj,_v[j]);
-      
+    int Nbasis = sizeof(out._odata[0]._internal._internal) / sizeof(out._odata[0]._internal._internal[0]);
+    assert(Nbasis == _evec._Nm);
+
+    Field tmp(_bgrid._grid);
+    tmp = in;
+    
+    for (int j=0;j<_evec._Nm;j++) {
 #pragma omp parallel for
       for (int b=0;b<_bgrid._o_blocks;b++) {
 	// |rhs> -= <j|rhs> |j>
-	_c[ cidx(i,b,j) ] = _bgrid.block_sp(b,vj,tmp);
+	auto c = _bgrid.block_sp(b,_evec._v[j],tmp);
+	_bgrid.block_caxpy(b,tmp,-c,_evec._v[j],tmp); // may make this more numerically stable
+	out._odata[b]._internal._internal[j] = c;
       }
     }
 
   }
-
-  void operator()(const Field& in, Field& out) {
-
-    Field tmp(in);
-    out = zero;
-
-    out.checkerboard = in.checkerboard;
-    tmp.checkerboard = in.checkerboard;
-
-#pragma omp parallel for
-    for (int b=0;b<_bgrid._o_blocks;b++) {
-      for (int j=0;j<_evec._Nm;j++) {
-	auto v = _bgrid.block_sp(b,_evec._v[j],tmp);
-	_bgrid.block_caxpy(b,out,v,_evec._v[j],out);
-	_bgrid.block_caxpy(b,tmp,-v,_evec._v[j],tmp);
-      }
-    }
-
-    }*/
 };
 
  /*

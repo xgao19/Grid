@@ -233,14 +233,18 @@ template<class Field>
 class BlockedField {
 public:
   typedef typename Field::scalar_type Coeff_t;
-  typedef typename FieldHP::scalar_type CoeffHP_t;
   typedef typename Field::vector_type vCoeff_t;
-  typedef typename FieldHP::vector_type vCoeffHP_t;
 
   std::vector< vCoeff_t > _c;
+  bool _c_current;
   Field _f;
+  bool _f_current;
 
-  BlockedField(GridBase* value) : _f(value) {
+  BlockedField(GridBase* value) : _f(value), _f_current(true), _c_current(false) {
+  }
+
+ BlockedField(const Field& value) : _f_current(true), _c_current(false), _f(value._grid) {
+    _f = value;
   }
 };
 
@@ -332,27 +336,38 @@ class BlockedFieldVector {
 
   }
 
-  BlockedField<FieldHP> get_blocked(int i) {
+  // recreate the field from coefficient data
+  void updateField(BlockedField<FieldHP>& ret) {
 
-    BlockedField<FieldHP> ret(_bgrid._grid);
-    ret = zero;
-    ret.checkerboard = _v[0].checkerboard;
+    if (ret._f_current)
+      return;
+
+    assert(ret._c_current);
+
+    ret._f.checkerboard = _v[0].checkerboard;
+    ret._f = zero;
     
     for (int j=0;j<_Nfull;j++) {
       FieldHP vj(_bgrid._grid);
       precisionChange(vj,_v[j]);
 #pragma omp parallel for
       for (int b=0;b<_bgrid._o_blocks;b++)
-	_bgrid.block_caxpy(b,ret,_c[ cidx(i,b,j) ],vj,ret);
+	_bgrid.block_caxpy(b,ret._f,ret._c[ cidx(0,b,j) ],vj,ret._f);
     }
-    
-    return ret;
+
+    ret._f_current = true;
+
   }
 
-  void put_blocked(int i, const FieldHP& rhs) {
+  // get coefficient data from field
+  void updateCoeff(BlockedField<FieldHP>& ret) {
 
-    FieldHP tmp(_bgrid._grid);
-    tmp = rhs;
+    if (ret._c_current)
+      return;
+
+    assert(ret._f_current);
+
+    ret._c.resize(_Nfull*_bgrid._o_blocks); // make sure size fits
 
     for (int j=0;j<_Nfull;j++) {
       FieldHP vj(_bgrid._grid);
@@ -361,19 +376,116 @@ class BlockedFieldVector {
 #pragma omp parallel for
       for (int b=0;b<_bgrid._o_blocks;b++) {
 	// |rhs> -= <j|rhs> |j>
-	_c[ cidx(i,b,j) ] = _bgrid.block_sp(b,vj,tmp);
+	ret._c[ cidx(0,b,j) ] = _bgrid.block_sp(b,vj,ret._f);
       }
     }
 
+    ret._c_current = true;
+
   }
 
-  FieldHP get(int i) {
+  void axpy(BlockedField<FieldHP>& ret, CoeffHP_t a, BlockedField<FieldHP>& x, BlockedField<FieldHP>& y) {
+    if (x._c_current && y._c_current) {
+      ret._c_current = true;
+      ret._f_current = false;
+      assert(x._c.size() == y._c.size());
+      ret._c.resize(x._c.size());
+#pragma omp parallel for
+      for (int i=0;i<(int)x._c.size();i++)
+	ret._c[i] = a*x._c[i] + y._c[i];
+    } else if (x._f_current && y._f_current) {
+      ret._c_current = false;
+      ret._f_current = true;
+      Grid::axpy(ret._f,a,x._f,y._f);
+    } else {
+      assert(0);
+    }
+  }
+
+  void scale(CoeffHP_t a, BlockedField<FieldHP>& ret) {
+    if (ret._c_current) {
+      ret._f_current = false;
+#pragma omp parallel for
+      for (int i=0;i<(int)ret._c.size();i++)
+	ret._c[i] *= a;
+    } else if (ret._f_current) {
+      ret._c_current = false;
+      ret._f = ret._f * a;
+    } else {
+      assert(0);
+    }
+  }
+
+  CoeffHP_t innerProduct(BlockedField<FieldHP>& x, BlockedField<FieldHP>& y) {
+    if (x._c_current && y._c_current) {
+      assert(x._c.size() == y._c.size());
+      vCoeffHP_t ret = 0.0;
+#pragma omp parallel shared(ret)
+      {
+        vCoeffHP_t lret = 0.0;
+#pragma omp for
+	for (int i=0;i<(int)x._c.size();i++)
+	  lret += conjugate(x._c[i])*y._c[i];
+#pragma omp critical
+	{
+	  ret += lret;
+        } 
+      }
+      return Reduce(ret);
+    } else if (x._f_current && y._f_current) {
+	return Grid::innerProduct(x._f,y._f);
+    } else {
+      assert(0);
+    }
+  }
+
+  RealD normalise(BlockedField<FieldHP>& v) {
+    RealD nn = innerProduct(v,v).real();
+    nn = sqrt(nn);
+    scale(1.0/nn,v);
+    return nn;
+  }
+
+
+  // restore coefficients from slot i
+  void coeffRestore(BlockedField<FieldHP>& ret, int i) {
+    ret._c.resize(_Nfull*_bgrid._o_blocks);
+    memcpy(&ret._c[0],&_c[ cidx(i,0,0) ],sizeof(vCoeffHP_t)*ret._c.size());
+    ret._f_current = false; // invalidate field representation
+    ret._c_current = true;
+  }
+  
+  // store coefficients in slot i
+  void coeffStore(BlockedField<FieldHP>& ret, int i) {
+
+    // trigger update of coefficients if needed
+    if (!ret._c_current)
+      updateCoeff(ret);
+
+    memcpy(&_c[ cidx(i,0,0) ],&ret._c[0],sizeof(vCoeffHP_t)*ret._c.size());
+
+  }
+
+  // get blocked field
+  BlockedField<FieldHP> get_blocked(int i) {
+
+    BlockedField<FieldHP> r(_bgrid._grid);
+    coeffRestore(r,i);
+    return r;
+
+  }
+
+  void put_blocked(int i, BlockedField<FieldHP>& rhs) {
+    coeffStore(rhs,i);
+  }
+
+  BlockedField<FieldHP> get(int i) {
     if (!_full_locked) {
 
       assert(i < _Nfull);
       FieldHP tmp(_bgrid._grid);
       precisionChange(tmp,_v[i]);
-      return tmp;
+      return BlockedField<FieldHP>(tmp);
 
     } else {
 
@@ -382,30 +494,26 @@ class BlockedFieldVector {
     }
   }
 
-  void put(int i, const FieldHP& v) {
+  FieldHP getField(int i) {
+    BlockedField<FieldHP> r = get(i);
+    updateField(r);
+    return r._f;
+  }
+
+  void put(int i, BlockedField<FieldHP>& v) {
     //std::cout << GridLogMessage << "::put(" << i << ")\n";
 
     if (!_full_locked && i >= _Nfull) {
-      // lock in smallest vectors so we can build on them
-      //Field test = _v[_Nfull - 1];
       lock_in_full_vectors();
-      //axpy(test,-1.0,get_blocked(_Nfull - 1),test);
-      //std::cout << GridLogMessage << "Error of lock_in_full_vectors: " << norm2(test) << std::endl;
     }
 
     if (!_full_locked) {
       assert(i < _Nfull);
       //_v[i] = v;
-      precisionChange(_v[i],v);
+      updateField(v);
+      precisionChange(_v[i],v._f);
     } else {
       put_blocked(i,v);
-
-#if 0 // this is wasted time now that we have tested the code for correctness
-      FieldHP test = get_blocked(i);
-      RealD nrm2b = norm2(test);
-      axpy(test,-1.0,v,test);
-      std::cout << GridLogMessage << "Error of vector: " << norm2(test) << " nrm2 = " << norm2(v) << " vs " << nrm2b << std::endl;
-#endif
     }
   }
 
@@ -414,52 +522,46 @@ class BlockedFieldVector {
     Field tmp(result);
     for (int i=0;i<N;i++) {
       int j = idx[i];
-      precisionChange(tmp,get(j));
-      axpy(result,TensorRemove(innerProduct(tmp,src_orig)) / eval[j],tmp,result);
+      BlockedField<FieldHP> v = get(j);
+      updateField(v);
+      precisionChange(tmp,v._f);
+      Grid::axpy(result,TensorRemove(Grid::innerProduct(tmp,src_orig)) / eval[j],tmp,result);
     }
   }
 
-  void orthogonalize(FieldHP& whp, int k, int evec_offset) {
+  void orthogonalize(BlockedField<FieldHP>& whp, int k, int evec_offset) {
 
     if (!_full_locked) {
+
+      assert(whp._f_current); // this needs to be current, without locking it should be
 
       //#define LANC_ORTH_HIGH_PRECISION
 #ifdef LANC_ORTH_HIGH_PRECISION
       for(int j=0; j<k; ++j){
 	FieldHP evec_j(_bgrid._grid);
 	precisionChange(evec_j,_v[j + evec_offset]);
-	CoeffHP_t ip = innerProduct(evec_j,whp);
-	whp = whp - ip*evec_j;
+	CoeffHP_t ip = Grid::innerProduct(evec_j,whp._f);
+	whp._f = whp._f - ip*evec_j;
 	//Field evec_j = _v[j + evec_offset];
 	//Coeff_t ip = (Coeff_t)innerProduct(evec_j,w); // are the evecs normalised? ; this assumes so.
 	//w = w - ip * evec_j;
       }
 #else
       Field w(_v[0]._grid);
-      precisionChange(w,whp);
+      precisionChange(w,whp._f);
       for(int j=0; j<k; ++j){
-	Coeff_t ip = (Coeff_t)innerProduct(_v[j + evec_offset],w);
+	Coeff_t ip = (Coeff_t)Grid::innerProduct(_v[j + evec_offset],w);
 	w = w - ip*_v[j + evec_offset];
       }
-      precisionChange(whp,w);
+      precisionChange(whp._f,w);
       
 #endif
 
     } else {
 
-      // first represent w in blocks
-      std::vector< vCoeffHP_t > cw;
-      cw.resize(_Nfull*_bgrid._o_blocks);
-
-      for (int j=0;j<_Nfull;j++) {
-	FieldHP vj(_bgrid._grid);
-	precisionChange(vj,_v[j]);
-
-#pragma omp parallel for
-	for (int b=0;b<_bgrid._o_blocks;b++) {
-	  cw[cidx(0,b,j)] = _bgrid.block_sp(b,vj,whp);
-	}
-      }
+      // locked in, work with coefficients
+      updateCoeff(whp);
+      std::vector< vCoeffHP_t >& cw = whp._c;
 
       // now can ortho just in coefficient space, should be much faster
       // w     = cw[ cidx(0,b,j) ] * _v[j,b]
@@ -508,18 +610,6 @@ class BlockedFieldVector {
 	    for (int l=0;l<_Nfull;l++)
 	      cw[ cidx(0,b,l) ] -= ip* _c[ cidx(j+evec_offset,b,l) ];
 	  }
-	}
-      }
-
-      // reconstruct w
-      whp = zero;
-      for (int j=0;j<_Nfull;j++) {
-	FieldHP vj(_bgrid._grid);
-	precisionChange(vj,_v[j]);
-
-#pragma omp parallel for
-	for (int b=0;b<_bgrid._o_blocks;b++) {
-	  _bgrid.block_caxpy(b,whp,cw[ cidx(0,b,j) ],vj,whp);
 	}
       }
 
@@ -974,94 +1064,6 @@ class BlockedFieldVector {
 };
 
 
-template<typename Field>
-class IdentityProjector : public LinearFunction<Field> {
-public:
-  IdentityProjector() {
-  }
-
-  void operator()(const Field& in, Field& out) {
-    out = in;
-  }
-};
-
- template<typename Field,typename FieldHP>
-class HighModeProjector : public LinearFunction<Field> {
-public:
-  int _N;
-  BlockedFieldVector<Field,FieldHP>& _evec;
-
- HighModeProjector(BlockedFieldVector<Field,FieldHP>& evec, int N) : _N(N), _evec(evec) {
-  }
-
-  void operator()(const Field& in, Field& out) {
-    out = in;
-    for (int i = 0;i<_N;i++) {
-      Field v = _evec.get(i);
-      // |v><v|out>
-      axpy(out,-innerProduct(v,out),v,out);
-    }
-  }
-};
-
- template<typename Field,typename FieldHP>
-class HighModeAndBlockProjector : public LinearFunction<Field> {
-public:
-   BlockedFieldVector<Field,FieldHP>& _evec;
-
- HighModeAndBlockProjector(BlockedFieldVector<Field,FieldHP>& evec) : _evec(evec) {
-  }
-
-  void operator()(const Field& in, Field& out) {
-    Field tmp(in);
-    tmp = in;
-
-    GridStopWatch gsw1,gsw2;
-#if 1 // first keep low modes and try to re-find them
-    // (1 - sum_n |n><n|) 
-    // first get low modes out
-    for (int i = 0;i<_evec._Nfull;i++) {
-      Field v = _evec.get(i);
-      gsw1.Start();
-      axpy(tmp,-innerProduct(v,tmp),v,tmp);
-      gsw1.Stop();
-    }
-#endif
-
-    out = zero;
-    out.checkerboard = tmp.checkerboard;
-    gsw2.Start();
-#pragma omp parallel for
-    for (int b=0;b<_evec._bgrid._o_blocks;b++) {
-      for (int j=0;j<_evec._Nfull;j++) {
-	auto v = _evec._bgrid.block_sp(b,_evec._v[j],tmp);
-	_evec._bgrid.block_caxpy(b,out,v,_evec._v[j],out);
-      }
-    }
-    gsw2.Stop();
-
-    /*
-      Count flops
-
-      6 per complex multiply, 2 per complex add
-
-      innerProduct:    COUNT_FLOPS_BYTES(8 / 2 * f_size_block, 2*f_size_block*sizeof(OPT));
-      axpy:            COUNT_FLOPS_BYTES(8 / 2 * f_size_block, 3*f_size_block*sizeof(OPT));
-
-    */
-    double Gflops = _evec._bgrid._cf_size * 2 * (8 / 2) * 2 / 1024./1024./1024. * _evec._Nfull;
-    double Gbytes = _evec._bgrid._cf_size * 2 * sizeof(_evec._c[0])/2 * 5 / 1024./1024./1024. * _evec._Nfull;
-    double gsw1_s = gsw1.useconds() / 1000. / 1000.;
-    double gsw2_s = gsw2.useconds() / 1000. / 1000.;
-
-    std::cout << GridLogMessage << "HighModeProjector norm2 = " << norm2(in) << " -> " << norm2(out) << 
-      " at " << Gflops/gsw1_s << " Gflops/s, " << Gflops/gsw2_s << " Gflops/s, " <<
-      Gbytes/gsw1_s << " Gbytes/s, " << Gbytes/gsw2_s << " Gbytes/s" <<
-      std::endl;
-  }
-};
-
-
 template<typename Field,typename FieldHP>
 class BlockProjector : public LinearFunction<FieldHP> {
 public:
@@ -1117,31 +1119,6 @@ public:
 };
 
 
- template<class Field>
-   class ProjectedSchurOperator :  public SchurOperatorBase<Field> {
- protected:
-   SchurOperatorBase<Field> &_Mat;
-   LinearFunction<Field> &_Pr;
- public:
-   ProjectedSchurOperator (SchurOperatorBase<Field>& Mat, LinearFunction<Field>& Pr): _Mat(Mat), _Pr(Pr) {};
-   
-   virtual  RealD Mpc      (const Field &in, Field &out) {
-     assert(0);
-   }
-   virtual  RealD MpcDag   (const Field &in, Field &out){
-     assert(0);
-   }
-   virtual void MpcDagMpc(const Field &in, Field &out,RealD &ni,RealD &no) {
-     Field tmp(in._grid);
-     _Pr(in,out);
-     _Mat.MpcDagMpc(out,tmp,ni,no);
-     _Pr(tmp,out);
-     ni = 0; // OK for current purpose
-     no = 0;
-   }
- };
-
-
 /////////////////////////////////////////////////////////////
 // Implicitly restarted lanczos
 /////////////////////////////////////////////////////////////
@@ -1173,7 +1150,6 @@ public:
 
     OperatorFunction<Field>   &_poly;
 
-    LinearFunction<FieldHP> &_proj;
     /////////////////////////
     // Constructor
     /////////////////////////
@@ -1183,7 +1159,6 @@ public:
     ImplicitlyRestartedLanczos(
 			       LinearOperatorBase<Field> &Linop, // op
 			       OperatorFunction<Field> & poly,   // polynmial
-			       LinearFunction<FieldHP> & proj,
 			       int _Nstop, // sought vecs
 			       int _Nk, // sought vecs
 			       int _Nm, // spare vecs
@@ -1192,7 +1167,6 @@ public:
 			       int _Nminres) :
       _Linop(Linop),
       _poly(poly),
-      _proj(proj),
       Nstop(_Nstop),
       Nk(_Nk),
       Nm(_Nm),
@@ -1206,7 +1180,6 @@ public:
     ImplicitlyRestartedLanczos(
 				LinearOperatorBase<Field> &Linop, // op
 			       OperatorFunction<Field> & poly,   // polynmial
-			       LinearFunction<FieldHP> & proj,
 			       int _Nk, // sought vecs
 			       int _Nm, // spare vecs
 			       RealD _eresid, // resid in lmdue deficit 
@@ -1214,7 +1187,6 @@ public:
 			       int _Nminres) : 
       _Linop(Linop),
       _poly(poly),
-      _proj(proj),
       Nstop(_Nk),
       Nk(_Nk),
       Nm(_Nm),
@@ -1269,50 +1241,51 @@ public:
     void step(DenseVector<RealD>& lmd,
 	      DenseVector<RealD>& lme, 
 	      BlockedFieldVector<Field,FieldHP>& evec,
-	      FieldHP& w,int Nm,int k,int evec_offset)
+	      BlockedField<FieldHP>& w,int Nm,int k,int evec_offset)
     {
       assert( k< Nm );
 
       GridStopWatch gsw_g,gsw_p,gsw_pr,gsw_cheb,gsw_o;
 
       gsw_g.Start();
-      FieldHP evec_k = evec.get(k + evec_offset);
+      BlockedField<FieldHP> evec_k = evec.get(k + evec_offset);
       gsw_g.Stop();
 
       Field wLP(evec._v[0]._grid);
-      FieldHP tmp(evec_k);
+      FieldHP tmp(evec_k._f);
       Field tmpLP(wLP);
 
       gsw_pr.Start();
-      _proj(evec_k,w);
+      evec.updateField(w); // make sure we have a proper field representation of w, we assume here that we started with a properly projected field
+      // TODO: could add a projector on w._f again
       gsw_pr.Stop();
+
+
       gsw_cheb.Start();
-      precisionChange(wLP,w);
+      precisionChange(wLP,w._f);
       _poly(_Linop,wLP,tmpLP);      // 3. wk:=Avk−βkv_{k−1}
       precisionChange(tmp,tmpLP);
       gsw_cheb.Stop();
+
       gsw_pr.Start();
-      _proj(tmp,w);
+      w = tmp; // set w to the field
+      if (evec._full_locked) {
+	evec.updateCoeff(w); // get coefficients after projection
+	w._f_current = false; // invalidate field representation which ensures that we are dealing with the projected operator
+      }
       gsw_pr.Stop();
 
-#if 0
-      // Should we adopt the compression?
-      if (k < Nm - 1) {
-	evec.put(k+1 + evec_offset,w);
-	w = evec.get(k+1+ evec_offset);
-      }
-#endif
-
       if(k>0){
-	w -= lme[k-1] * evec.get(k-1 + evec_offset);
+	auto evec_kmo = evec.get(k-1 + evec_offset);
+	evec.axpy(w,-lme[k-1],evec_kmo,w);
       }    
 
-      ComplexD zalph = innerProduct(evec_k,w); // 4. αk:=(wk,vk)
+      ComplexD zalph = evec.innerProduct(evec_k,w); // 4. αk:=(wk,vk)
       RealD     alph = real(zalph);
 
-      w = w - alph * evec_k;// 5. wk:=wk−αkvk
+      evec.axpy(w,-alph,evec_k,w);// 5. wk:=wk−αkvk
 
-      RealD beta = normalise(w); // 6. βk+1 := ∥wk∥2. If βk+1 = 0 then Stop
+      RealD beta = evec.normalise(w); // 6. βk+1 := ∥wk∥2. If βk+1 = 0 then Stop
                                  // 7. vk+1 := wk/βk+1
 
       std::cout<<GridLogMessage << "alpha[" << k << "] = " << zalph << " beta[" << k << "] = "<<beta<<std::endl;
@@ -1332,7 +1305,6 @@ public:
       gsw_p.Start();
       if(k < Nm-1) { 
 	evec.put(k+1 + evec_offset, w);
-	//w = evec.get(k+1 + evec_offset);  // adopt compression for w?
       }
       gsw_p.Stop();
 
@@ -1595,17 +1567,13 @@ public:
       return nn;
     }
 
-    void orthogonalize(FieldHP& w,
+    void orthogonalize(BlockedField<FieldHP>& w,
 		       BlockedFieldVector<Field,FieldHP>& evec,
 		       int k, int evec_offset)
     {
       double t0=-usecond()/1e6;
-      typedef typename Field::scalar_type MyComplex;
-      MyComplex ip;
-
       evec.orthogonalize(w,k,evec_offset);
-
-      normalise(w);
+      evec.normalise(w);
       t0+=usecond()/1e6;
       OrthoTime +=t0;
     }
@@ -1659,8 +1627,8 @@ until convergence
 	DenseVector<int>   Iconv(Nm);
 
 
-	FieldHP f(grid);
-	FieldHP v(grid);
+	BlockedField<FieldHP> f(grid);
+	BlockedField<FieldHP> v(grid);
   
 	int k1 = 1;
 	int k2 = Nk;
@@ -1672,13 +1640,13 @@ until convergence
 	// Set initial vector
 	// (uniform vector) Why not src??
 	//	evec[0] = 1.0;
-	FieldHP src_n=src;
-	normalise(src_n);
-	evec.put(0 + evec_offset,src_n);
-	std:: cout<<GridLogMessage <<"norm2(src)= " << norm2(src)<<std::endl;
-// << src._grid  << std::endl;
-	std:: cout<<GridLogMessage <<"norm2(evec[0])= " << norm2(evec.get(0 + evec_offset)) <<std::endl;
-// << evec[0]._grid << std::endl;
+	{
+	  FieldHP src_n=src;
+	  normalise(src_n);
+	  BlockedField<FieldHP> bsrc(src_n);
+	  evec.put(0 + evec_offset,bsrc);
+	  std:: cout<<GridLogMessage <<"norm2(src)= " << norm2(src)<<std::endl;
+	}
 	
 	// Initial Nk steps
 	OrthoTime=0.;
@@ -1711,7 +1679,7 @@ until convergence
 	  t1=usecond()/1e6;
 	  std::cout<<GridLogMessage <<"IRL:: "<<Np <<" steps: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
 	  std::cout<<GridLogMessage <<"IRL::Initial steps:OrthoTime "<<OrthoTime<< "seconds"<<std::endl;
-	  f *= lme[Nm-1];
+	  evec.scale(lme[Nm-1],f);
 	  
 	  RitzMatrix(evec,k2);
 	  t1=usecond()/1e6;
@@ -1756,14 +1724,17 @@ until convergence
 	  fflush(stdout);
 	  
 	  // Compressed vector f and beta(k2)
-	  f *= Qt[Nm-1+Nm*(k2-1)];
-	  f += lme[k2-1] * evec.get(k2 + evec_offset);
-	  beta_k = norm2(f);
+	  evec.scale(Qt[Nm-1+Nm*(k2-1)],f);
+	  auto evec_k2 = evec.get(k2 + evec_offset);
+	  evec.axpy(f,lme[k2-1],evec_k2,f);
+	  beta_k = evec.innerProduct(f,f).real();
 	  beta_k = sqrt(beta_k);
 	  std::cout<<GridLogMessage<<" beta(k) = "<<beta_k<<std::endl;
 	  
 	  RealD betar = 1.0/beta_k;
-	  evec.put(k2 + evec_offset, betar * f);
+	  auto fprime = f;
+	  evec.scale(betar,f);
+	  evec.put(k2 + evec_offset, fprime);
 	  lme[k2-1] = beta_k;
 	  
 	  // Convergence test
@@ -1783,7 +1754,7 @@ until convergence
 	    std::cout << GridLogMessage << "Rotation to test convergence " << std::endl;
 	    
 	    FieldHP ev0_orig(grid);
-	    ev0_orig = evec.get(0 + evec_offset);
+	    ev0_orig = evec.getField(0 + evec_offset);
 	    
 	    evec.rotate(Qt,0,Nk,0,Nk,Nm,evec_offset);
 	    
@@ -1792,8 +1763,8 @@ until convergence
 	      FieldHP B(grid);
 	      
 	      for(int j = 0; j<Nk; ++j){
-		B=evec.get(j + evec_offset);
-		B.checkerboard = evec.get(0 + evec_offset).checkerboard;
+		B=evec.getField(j + evec_offset);
+		//B.checkerboard = evec.get(0 + evec_offset).checkerboard;
 		//std::cout << GridLogMessage << "Checkerboard: " << B.checkerboard << " norm2 = " << norm2(B) << std::endl;
 		
 		/*{
@@ -1803,21 +1774,32 @@ until convergence
 		FieldHP tmp(B);
 		Field   tmpLP(evec._v[0]._grid);
 		Field   vLP(tmpLP);
-		_proj(B,v);
-		precisionChange(vLP,v);
+		FieldHP vHP(tmp);
+		if (evec._full_locked) {
+		  BlockProjector<Field,FieldHP> _proj(evec);
+		  _proj(B,vHP);
+		} else {
+		  vHP = B;
+		}
+		precisionChange(vLP,vHP);
 		if (!test_conv_poly)
 		  _Linop.HermOp(vLP,tmpLP);
 		else
 		  _poly(_Linop,vLP,tmpLP);      // 3. wk:=Avk−βkv_{k−1}
 		precisionChange(tmp,tmpLP);
-		_proj(tmp,v);
+		if (evec._full_locked) {
+		  BlockProjector<Field,FieldHP> _proj(evec);
+		  _proj(tmp,vHP);
+		} else {
+		  vHP = tmp;
+		}
 		
-		RealD vnum = real(innerProduct(B,v)); // HermOp.
+		RealD vnum = real(innerProduct(B,vHP)); // HermOp.
 		RealD vden = norm2(B);
-		RealD vv0 = norm2(v);
+		RealD vv0 = norm2(vHP);
 		eval2[j] = vnum/vden;
-		v -= eval2[j]*B;
-		RealD vv = norm2(v);
+		vHP -= eval2[j]*B;
+		RealD vv = norm2(vHP);
 		std::string xtr;
 		if (test_conv_poly) {
 		  vv /= ::pow(eval2[j],2.0);
@@ -1867,7 +1849,7 @@ until convergence
 		assert(res_check_rotate_inverse < 1e-7);
 		evec.rotate(QtI,0,Nk,0,Nk,Nm,evec_offset);
 		
-		axpy(ev0_orig,-1.0,evec.get(0 + evec_offset),ev0_orig);
+		axpy(ev0_orig,-1.0,evec.getField(0 + evec_offset),ev0_orig);
 		std::cout << GridLogMessage << "Rotation done (in " << timeInv.Elapsed() << " = " << timeInv.useconds() << " us" <<
 		  ", error = " << res_check_rotate_inverse << 
 		  "); | evec[0] - evec[0]_orig | = " << ::sqrt(norm2(ev0_orig)) << std::endl;
@@ -1894,7 +1876,7 @@ until convergence
 	 
 	 // test
 	 for (int j=0;j<Nconv;j++) {
-	   std::cout<<GridLogMessage << " |e[" << j << "]|^2 = " << norm2(evec.get(j + evec_offset)) << std::endl;
+	   std::cout<<GridLogMessage << " |e[" << j << "]|^2 = " << norm2(evec.getField(j + evec_offset)) << std::endl;
 	 }
        }
        

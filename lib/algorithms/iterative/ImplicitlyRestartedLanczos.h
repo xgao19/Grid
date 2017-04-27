@@ -1225,12 +1225,16 @@ until convergence
 	// quickly get an idea of the largest eigenvalue to more properly normalize the residuum
 	RealD evalMaxApprox = 0.0;
 	{
+	  auto src_n = src;
 	  auto tmp = src;
-	  _HermOpTest(src,tmp);
-	  RealD vnum = real(innerProduct(src,tmp)); // HermOp.
-	  RealD vden = norm2(src);
-	  evalMaxApprox = vnum/vden;
-	  std::cout << GridLogMessage << " Approximation of largest eigenvalue: " << evalMaxApprox << std::endl;
+	  for (int i=0;i<5;i++) {
+	    _HermOpTest(src_n,tmp);
+	    RealD vnum = real(innerProduct(src_n,tmp)); // HermOp.
+	    RealD vden = norm2(src_n);
+	    evalMaxApprox = vnum/vden;
+	    std::cout << GridLogMessage << " Approximation of largest eigenvalue: " << evalMaxApprox << std::endl;
+	    src_n = tmp;
+	  }
 	}
 	
 	DenseVector<RealD> lme(Nm);  
@@ -1369,11 +1373,11 @@ until convergence
 		RealD vv0 = norm2(v);
 		eval2[j] = vnum/vden;
 		v -= eval2[j]*B;
-		RealD vv = norm2(v) / evalMaxApprox;
+		RealD vv = norm2(v) / pow(evalMaxApprox,2.0);
 		std::cout.precision(13);
 		std::cout<<GridLogMessage << "[" << std::setw(3)<< std::setiosflags(std::ios_base::right) <<j<<"] "
 			 <<"eval = "<<std::setw(25)<< std::setiosflags(std::ios_base::left)<< eval2[j]
-			 <<" |H B[i] - eval[i]B[i]|^2 / evalMaxApprox " << std::setw(25)<< std::setiosflags(std::ios_base::right)<< vv
+			 <<" |H B[i] - eval[i]B[i]|^2 / evalMaxApprox^2 " << std::setw(25)<< std::setiosflags(std::ios_base::right)<< vv
 			 <<" "<< vnum/(sqrt(vden)*sqrt(vv0))
 			 << " norm(B["<<j<<"])="<< vden <<std::endl;
 		

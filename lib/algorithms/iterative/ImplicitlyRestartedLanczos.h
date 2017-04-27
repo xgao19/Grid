@@ -32,8 +32,6 @@ Author: Christoph Lehner <clehner@bnl.gov>
 #define GRID_IRL_H
 
 #include <Grid/Eigen/Dense>
-//#include <set>
-//#include <list>
 
 #include <string.h> //memset
 #ifdef USE_LAPACK
@@ -60,7 +58,6 @@ template<typename Field>
 class BlockedGrid {
 public:
   GridBase* _grid;
-
   typedef typename Field::scalar_type Coeff_t;
   typedef typename Field::vector_type vCoeff_t;
   
@@ -229,453 +226,74 @@ public:
 
 };
 
+
+
 template<class Field>
-class BlockedField {
-public:
-  typedef typename Field::scalar_type Coeff_t;
-  typedef typename Field::vector_type vCoeff_t;
-
-  std::vector< vCoeff_t > _c;
-  bool _c_current;
-  Field _f;
-  bool _f_current;
-
-  BlockedField(GridBase* value) : _f(value), _f_current(true), _c_current(false) {
-  }
-
- BlockedField(const Field& value) : _f_current(true), _c_current(false), _f(value._grid) {
-    _f = value;
-  }
-};
-
-template<class Field, class FieldHP>
-class BlockedFieldVector {
+class BasisFieldVector {
  public:
-  int _Nm,  // number of total vectors
-    _Nfull; // number of vectors kept in full precision
+  int _Nm;
 
   typedef typename Field::scalar_type Coeff_t;
-  typedef typename FieldHP::scalar_type CoeffHP_t;
   typedef typename Field::vector_type vCoeff_t;
-  typedef typename FieldHP::vector_type vCoeffHP_t;
   typedef typename Field::vector_object vobj;
   typedef typename vobj::scalar_object sobj;
 
-  BlockedGrid<FieldHP> _bgrid;
-  BlockedGrid<Field> _bgridLP;
-  
   std::vector<Field> _v; // _Nfull vectors
-  std::vector< vCoeffHP_t > _c; 
-
-  bool _full_locked;
   
-  //public:
+  BasisFieldVector(int Nm,GridBase* value) : _Nm(Nm), _v(Nm,value) {
 
-  BlockedFieldVector(int Nm,GridBase* value,GridBase* valueHP,int Nfull,const std::vector<int>& block_size) : 
-  _Nfull(Nfull), _Nm(Nm), _v(Nfull,value), _bgrid(valueHP,block_size), _bgridLP(value,block_size), _full_locked(false) {
-
-    std::cout << GridLogMessage << "BlockedFieldVector initialized:\n";
+    std::cout << GridLogMessage << "BasisFieldVector initialized:\n";
     std::cout << GridLogMessage << " Nm = " << Nm << "\n";
-    std::cout << GridLogMessage << " Nfull = " << Nfull << "\n";
-    std::cout << GridLogMessage << " Size of coefficients = " << 
-      ((double)_c.size()*sizeof(Coeff_t) / 1024./1024./1024.) << " GB\n";
     std::cout << GridLogMessage << " Size of full vectors = " << 
-      ((double)_v.size()*sizeof(Coeff_t)*_bgrid._cf_size / 1024./1024./1024.) << " GB\n";
+      ((double)_v.size()*sizeof(vobj)*value->oSites() / 1024./1024./1024.) << " GB\n";
   }
   
-  ~BlockedFieldVector() {
-  
+  ~BasisFieldVector() {
   }
 
-#define cidx(i,b,j) ((int64_t)b + (int64_t)_bgrid._o_blocks * (int64_t)(j + _Nfull*i))
-  
-  void lock_in_full_vectors() {
+  Field& operator[](int i) {
+    return _v[i];
+  }
 
-    assert(!_full_locked);
-    _full_locked = true;
-
-    // resize appropriately
-    _c.resize(_Nm*_Nfull*_bgrid._o_blocks);
-#pragma omp parallel for
-    for (int64_t i=0;i<_c.size();i++)
-      _c[i] = 0.0;
-
-    GridStopWatch sw;
-    sw.Start();
-    // orthogonalize local blocks and create coefficients for first Nfull vectors
-    for (int i=0;i<_Nfull;i++) {
-      
-      FieldHP vi(_bgrid._grid);
-      precisionChange(vi,_v[i]);
-      
-      // |i> -= <j|i> |j>
-      for (int j=0;j<i;j++) {
-
-	FieldHP vj(_bgrid._grid);
-	precisionChange(vj,_v[j]);
-
-#pragma omp parallel for
-	for (int b=0;b<_bgrid._o_blocks;b++) {
-	  vCoeffHP_t v = _bgrid.block_sp(b,vj,vi);
-	  _c[ cidx(i,b,j) ] = v;
-	  _bgrid.block_caxpy(b,vi,-v,vj,vi);
-	}
-      }
-      
-#pragma omp parallel for
-      for (int b=0;b<_bgrid._o_blocks;b++) {
-	vCoeffHP_t nrm = _bgrid.block_sp(b,vi,vi);
-	_c[ cidx(i,b,i) ] = sqrt(nrm);
-	_bgrid.block_cscale(b,1.0 / sqrt(nrm),vi);
-      }
-      
-      precisionChange(_v[i],vi); // copy back
+  void orthogonalize(Field& w, int k) {
+    for(int j=0; j<k; ++j){
+      Coeff_t ip = (Coeff_t)innerProduct(_v[j],w);
+      w = w - ip*_v[j];
     }
-    sw.Stop();
-    std::cout << GridLogMessage << "Gram-Schmidt to create blocked basis took " << sw.Elapsed() << std::endl;
-
   }
 
-  // recreate the field from coefficient data
-  void updateField(BlockedField<FieldHP>& ret) {
-
-    if (ret._f_current)
-      return;
-
-    assert(ret._c_current);
-
-    ret._f.checkerboard = _v[0].checkerboard;
-    ret._f = zero;
+  void rotate(DenseVector<RealD>& Qt,int j0, int j1, int k0,int k1,int Nm) {
     
-    for (int j=0;j<_Nfull;j++) {
-      FieldHP vj(_bgrid._grid);
-      precisionChange(vj,_v[j]);
-#pragma omp parallel for
-      for (int b=0;b<_bgrid._o_blocks;b++)
-	_bgrid.block_caxpy(b,ret._f,ret._c[ cidx(0,b,j) ],vj,ret._f);
-    }
-
-    ret._f_current = true;
-
-  }
-
-  // get coefficient data from field
-  void updateCoeff(BlockedField<FieldHP>& ret) {
-
-    if (ret._c_current)
-      return;
-
-    assert(ret._f_current);
-
-    ret._c.resize(_Nfull*_bgrid._o_blocks); // make sure size fits
-
-    for (int j=0;j<_Nfull;j++) {
-      FieldHP vj(_bgrid._grid);
-      precisionChange(vj,_v[j]);
-      
-#pragma omp parallel for
-      for (int b=0;b<_bgrid._o_blocks;b++) {
-	// |rhs> -= <j|rhs> |j>
-	ret._c[ cidx(0,b,j) ] = _bgrid.block_sp(b,vj,ret._f);
-      }
-    }
-
-    ret._c_current = true;
-
-  }
-
-  void axpy(BlockedField<FieldHP>& ret, CoeffHP_t a, BlockedField<FieldHP>& x, BlockedField<FieldHP>& y) {
-    if (x._c_current && y._c_current) {
-      ret._c_current = true;
-      ret._f_current = false;
-      assert(x._c.size() == y._c.size());
-      ret._c.resize(x._c.size());
-#pragma omp parallel for
-      for (int i=0;i<(int)x._c.size();i++)
-	ret._c[i] = a*x._c[i] + y._c[i];
-    } else if (x._f_current && y._f_current) {
-      ret._c_current = false;
-      ret._f_current = true;
-      Grid::axpy(ret._f,a,x._f,y._f);
-    } else {
-      assert(0);
-    }
-  }
-
-  void scale(CoeffHP_t a, BlockedField<FieldHP>& ret) {
-    if (ret._c_current) {
-      ret._f_current = false;
-#pragma omp parallel for
-      for (int i=0;i<(int)ret._c.size();i++)
-	ret._c[i] *= a;
-    } else if (ret._f_current) {
-      ret._c_current = false;
-      ret._f = ret._f * a;
-    } else {
-      assert(0);
-    }
-  }
-
-  CoeffHP_t innerProduct(BlockedField<FieldHP>& x, BlockedField<FieldHP>& y) {
-    if (x._c_current && y._c_current) {
-      assert(x._c.size() == y._c.size());
-      vCoeffHP_t ret = 0.0;
-#pragma omp parallel shared(ret)
-      {
-        vCoeffHP_t lret = 0.0;
-#pragma omp for
-	for (int i=0;i<(int)x._c.size();i++)
-	  lret += conjugate(x._c[i])*y._c[i];
-#pragma omp critical
-	{
-	  ret += lret;
-        } 
-      }
-      return Reduce(ret);
-    } else if (x._f_current && y._f_current) {
-	return Grid::innerProduct(x._f,y._f);
-    } else {
-      assert(0);
-    }
-  }
-
-  RealD normalise(BlockedField<FieldHP>& v) {
-    RealD nn = innerProduct(v,v).real();
-    nn = sqrt(nn);
-    scale(1.0/nn,v);
-    return nn;
-  }
-
-
-  // restore coefficients from slot i
-  void coeffRestore(BlockedField<FieldHP>& ret, int i) {
-    ret._c.resize(_Nfull*_bgrid._o_blocks);
-    memcpy(&ret._c[0],&_c[ cidx(i,0,0) ],sizeof(vCoeffHP_t)*ret._c.size());
-    ret._f_current = false; // invalidate field representation
-    ret._c_current = true;
-  }
-  
-  // store coefficients in slot i
-  void coeffStore(BlockedField<FieldHP>& ret, int i) {
-
-    // trigger update of coefficients if needed
-    if (!ret._c_current)
-      updateCoeff(ret);
-
-    memcpy(&_c[ cidx(i,0,0) ],&ret._c[0],sizeof(vCoeffHP_t)*ret._c.size());
-
-  }
-
-  // get blocked field
-  BlockedField<FieldHP> get_blocked(int i) {
-
-    BlockedField<FieldHP> r(_bgrid._grid);
-    coeffRestore(r,i);
-    return r;
-
-  }
-
-  void put_blocked(int i, BlockedField<FieldHP>& rhs) {
-    coeffStore(rhs,i);
-  }
-
-  BlockedField<FieldHP> get(int i) {
-    if (!_full_locked) {
-
-      assert(i < _Nfull);
-      FieldHP tmp(_bgrid._grid);
-      precisionChange(tmp,_v[i]);
-      return BlockedField<FieldHP>(tmp);
-
-    } else {
-
-      return get_blocked(i);
-
-    }
-  }
-
-  FieldHP getField(int i) {
-    BlockedField<FieldHP> r = get(i);
-    updateField(r);
-    return r._f;
-  }
-
-  void put(int i, BlockedField<FieldHP>& v) {
-    //std::cout << GridLogMessage << "::put(" << i << ")\n";
-
-    if (!_full_locked && i >= _Nfull) {
-      lock_in_full_vectors();
-    }
-
-    if (!_full_locked) {
-      assert(i < _Nfull);
-      //_v[i] = v;
-      updateField(v);
-      precisionChange(_v[i],v._f);
-    } else {
-      put_blocked(i,v);
-    }
-  }
-
-  void deflate(const std::vector<RealD>& eval,const std::vector<int>& idx,int N,const Field& src_orig,Field& result) {
-    result = zero;
-    Field tmp(result);
-    for (int i=0;i<N;i++) {
-      int j = idx[i];
-      BlockedField<FieldHP> v = get(j);
-      updateField(v);
-      precisionChange(tmp,v._f);
-      Grid::axpy(result,TensorRemove(Grid::innerProduct(tmp,src_orig)) / eval[j],tmp,result);
-    }
-  }
-
-  void orthogonalize(BlockedField<FieldHP>& whp, int k, int evec_offset) {
-
-    if (!_full_locked) {
-
-      assert(whp._f_current); // this needs to be current, without locking it should be
-
-      //#define LANC_ORTH_HIGH_PRECISION
-#ifdef LANC_ORTH_HIGH_PRECISION
-      for(int j=0; j<k; ++j){
-	FieldHP evec_j(_bgrid._grid);
-	precisionChange(evec_j,_v[j + evec_offset]);
-	CoeffHP_t ip = Grid::innerProduct(evec_j,whp._f);
-	whp._f = whp._f - ip*evec_j;
-	//Field evec_j = _v[j + evec_offset];
-	//Coeff_t ip = (Coeff_t)innerProduct(evec_j,w); // are the evecs normalised? ; this assumes so.
-	//w = w - ip * evec_j;
-      }
-#else
-      Field w(_v[0]._grid);
-      precisionChange(w,whp._f);
-      for(int j=0; j<k; ++j){
-	Coeff_t ip = (Coeff_t)Grid::innerProduct(_v[j + evec_offset],w);
-	w = w - ip*_v[j + evec_offset];
-      }
-      precisionChange(whp._f,w);
-      
-#endif
-
-    } else {
-
-      // locked in, work with coefficients
-      updateCoeff(whp);
-      std::vector< vCoeffHP_t >& cw = whp._c;
-
-      // now can ortho just in coefficient space, should be much faster
-      // w     = cw[ cidx(0,b,j) ] * _v[j,b]
-      // _v[i] = _c[ cidx(i,b,j) ] * _v[j,b]
-
-      CoeffHP_t ip;
-#pragma omp parallel shared(ip)
-      {
-	for(int j=0; j<k; ++j) {
-
-#pragma omp barrier
-#pragma omp single
-	  {
-	    ip = 0;
-	  }
-
-	  //Field evec_j = _v[j + evec_offset];
-	  // evec_j = _c[ cidx(j + evec_offset,b,l) ] * _v[l,b]
-	  
-	  // ip = innerProduct(evec_j,w);
-	  // ip = conj(_c[ cidx(j + evec_offset,b,l) ]) * innerProduct(_v[l,b],_v[l',b']) * cw[ cidx(0,b',l') ]
-	  //    = conj(_c[ cidx(j + evec_offset,b,l) ]) * cw[ cidx(0,b,l) ]
-	  CoeffHP_t ipl = 0;
-#pragma omp for
-	  for (int b=0;b<_bgrid._o_blocks;b++) {
-	    for (int l=0;l<_Nfull;l++)
-	      ipl += Reduce(conjugate(_c[ cidx(j + evec_offset,b,l) ]) * cw[ cidx(0,b,l) ]);
-	  }
-
-#pragma omp critical
-	  {
-	    ip += ipl;
-	  }
-
-#pragma omp barrier
-#pragma omp single
-	  {
-	    _bgrid._grid->GlobalSum(ip);
-	    //std::cout << GridLogMessage << "Overlap of " << k << " with " << j << " is " << ipl << std::endl;
-	  }
-
-
-	  //w = w - ip * evec_j;
-#pragma omp for
-	  for (int b=0;b<_bgrid._o_blocks;b++) {
-	    for (int l=0;l<_Nfull;l++)
-	      cw[ cidx(0,b,l) ] -= ip* _c[ cidx(j+evec_offset,b,l) ];
-	  }
-	}
-      }
-
-    }
-
-  }
-
-  void rotate(DenseVector<RealD>& Qt,int j0, int j1, int k0,int k1,int Nm,int evec_offset) {
-   
-    if (!_full_locked) {
-
-      GridBase* grid = _v[0]._grid;
+    GridBase* grid = _v[0]._grid;
       
 #pragma omp parallel
-      {
-	std::vector < vobj > B(Nm);
+    {
+      std::vector < vobj > B(Nm);
+      
+#pragma omp for
+      for(int ss=0;ss < grid->oSites();ss++){
+	for(int j=j0; j<j1; ++j) B[j]=0.;
 	
-#pragma omp for
-	for(int ss=0;ss < grid->oSites();ss++){
-	  for(int j=j0; j<j1; ++j) B[j]=0.;
-	  
-	  for(int j=j0; j<j1; ++j){
-	    for(int k=k0; k<k1; ++k){
-	      B[j] +=Qt[k+Nm*j] * _v[k + evec_offset]._odata[ss];
-	    }
-	  }
-	  for(int j=j0; j<j1; ++j){
-	    _v[j + evec_offset]._odata[ss] = B[j];
+	for(int j=j0; j<j1; ++j){
+	  for(int k=k0; k<k1; ++k){
+	    B[j] +=Qt[k+Nm*j] * _v[k]._odata[ss];
 	  }
 	}
-      }
-    } else {
-
-      // B_j = Q_jk A_k
-      // A_k = _c[ k, bj ] _v[bj]
-      // B_j = Q_jk _c[ k, bl ] _v[bl]
-      // -> _c[ j, bl ] = Q_jk _c[ k, bl ]
-#pragma omp parallel
-      {
-        std::vector<vCoeffHP_t> c0;
-	c0.resize(_Nfull*Nm);
-
-#pragma omp for
-        for (int b=0;b<_bgrid._o_blocks;b++) {
-          for (int l=0;l<_Nfull;l++) {
-	    for(int j=j0; j<j1; ++j){
-	      vCoeffHP_t& cc = c0[l + _Nfull*j];
-	      cc = 0.0;
-	      for(int k=k0; k<k1; ++k){
-		cc +=Qt[k+Nm*j] * _c[ cidx((k+evec_offset),b,l) ];
-	      }
-	    }
-          }
-	  for (int l=0;l<_Nfull;l++) {
-	    for(int j=j0; j<j1; ++j){
-	      _c[ cidx((j+evec_offset),b,l) ] = c0[l + _Nfull*j];
-	    }
-	  }
+	for(int j=j0; j<j1; ++j){
+	  _v[j]._odata[ss] = B[j];
 	}
       }
-      
     }
+
   }
 
   size_t size() const {
     return _Nm;
+  }
+
+  void resize(int n) {
+    _Nm = n;
+    _v.resize(n,_v[0]._grid);
   }
 
   std::vector<int> getIndex(DenseVector<RealD>& sort_vals) {
@@ -690,440 +308,489 @@ class BlockedFieldVector {
     return idx;
   }
 
+ };
 
-  // zlib's crc32 gets 0.4 GB/s on KNL single thread
-  // below gets 4.8 GB/s
-  uint32_t crc32_threaded(unsigned char* data, int64_t len, uint32_t previousCrc32 = 0) {
-
-    return crc32(previousCrc32,data,len);
-
-    // below needs further tuning/testing
-    std::vector<uint32_t> partials;
-    std::vector<int64_t> lens;
-    int64_t len_part;
-
-#pragma omp parallel shared(partials,lens,len_part)
-    {
-      int threads = omp_get_num_threads();
-      int thread  = omp_get_thread_num();
-
-#pragma omp single
-      {
-	partials.resize(threads);
-	lens.resize(threads);
-	assert(len % threads == 0); // for now 64 divides all our data, easy to generalize
-	len_part = len / threads;
-      }
-
-#pragma omp barrier
-
-      partials[thread] = crc32(thread == 0 ? previousCrc32 : 0x0,data + len_part * thread,len_part);
-      lens[thread] = len_part;
-
-      // reduction
-      while (lens.size() > 1) {
-
-	uint32_t com_val;
-	int64_t com_len;
-	if (thread % 2 == 0) {
-	  if (thread + 1 < (int)partials.size()) {
-	    com_val = crc32_combine(partials[thread],partials[thread+1],lens[thread+1]);
-	    com_len = lens[thread] + lens[thread+1];
-	  } else if (thread + 1 == (int)partials.size()) {
-	    com_val = partials[thread];
-	    com_len = lens[thread];
-	  } else {
-	    com_len = -1; // inactive thread
-	  }
-	} else {
-	  com_len = -1;
-	}
-
-	//std::cout << "Reducing in thread " << thread << " from lens.size() = " << lens.size() << " found " << com_len << std::endl;
-	
-#pragma omp barrier
-
-#pragma omp single
-	{
-	  partials.resize(0);
-	  lens.resize(0);
-	}
-
-#pragma omp barrier
-	
-#pragma omp critical
-	{
-	  if (com_len != -1) {
-	    partials.push_back(com_val);
-	    lens.push_back(com_len);
-	  }
-	}
-
-#pragma omp barrier
-      }	
-
-    }
-
-    return partials[0];
-  }
-
-  int get_bfm_index( int* pos, int co, int* s ) {
-    
-    int ls = s[0];
-    int NtHalf = s[4] / 2;
-    int simd_coor = pos[4] / NtHalf;
-    int regu_coor = (pos[1] + s[1] * (pos[2] + s[2] * ( pos[3] + s[3] * (pos[4] % NtHalf) ) )) / 2;
-     
-    return regu_coor * ls * 48 + pos[0] * 48 + co * 4 + simd_coor * 2;
-  }
-
-  bool read_argonne(const char* dir, const std::vector<int>& cnodes) {
-
-    assert(!_full_locked);
-
-    // this is slow code to read the argonne file format for debugging purposes
-    std::vector<int> nodes = cnodes;
-    std::vector<int> slot_lvol, lvol;
-    int _nd = (int)nodes.size();
-    int i, ntotal = 1;
-    int64_t lsites = 1;
-    int64_t slot_lsites = 1;
-    for (i=0;i<_nd;i++) {
-      slot_lvol.push_back(_bgrid._grid->FullDimensions()[i] / nodes[i]);
-      lvol.push_back(_bgrid._grid->FullDimensions()[i] / _bgrid._grid->_processors[i]);
-      lsites *= lvol.back();
-      slot_lsites *= slot_lvol.back();
-      ntotal *= nodes[i];
-    }
-
-    int nperdir = ntotal / 32;
-    if (nperdir < 1)
-      nperdir=1;
-    std::cout << GridLogMessage << " Read " << dir << " nodes = " << nodes << std::endl;
-    std::cout << GridLogMessage << " lvol = " << lvol << std::endl;
-
-    std::map<int, std::vector<int> > slots;
-
-
-    {
-      std::vector<int> lcoor, gcoor, scoor;
-      lcoor.resize(_nd); gcoor.resize(_nd);  scoor.resize(_nd);
-      
-      // first create mapping of indices to slots
-      for (int lidx = 0; lidx < lsites; lidx++) {
-	Lexicographic::CoorFromIndex(lcoor,lidx,lvol);
-	for (int i=0;i<_nd;i++) {
-	  gcoor[i] = lcoor[i] + _bgrid._grid->_processor_coor[i]*lvol[i];
-	  scoor[i] = gcoor[i] / slot_lvol[i];
-	}
-	int slot;
-	Lexicographic::IndexFromCoor(scoor,slot,nodes);
-	auto sl = slots.find(slot);
-	if (sl == slots.end())
-	  slots[slot] = std::vector<int>();
-	slots[slot].push_back(lidx);
-      }
-    }
-
-    // now load one slot at a time and fill the vector
-    for (auto sl=slots.begin();sl!=slots.end();sl++) {
-      std::vector<int>& idx = sl->second;
-      int slot = sl->first;
-      std::vector<float> rdata;
-
-      char buf[4096];
-
-      sprintf(buf,"%s/checksums.txt",dir);
-      FILE* f = fopen(buf,"rt");
-      if (!f)
-	return false;
-
-      for (int l=0;l<3+slot;l++)
-	fgets(buf,sizeof(buf),f);
-      uint32_t crc_exp = strtol(buf, NULL, 16);
-      fclose(f);
-
-      // load one slot vector
-      sprintf(buf,"%s/%2.2d/%10.10d",dir,slot/nperdir,slot);
-      f = fopen(buf,"rb");
-      if (!f)
-	return false;
-      
-      fseeko(f,0,SEEK_END);
-      off_t total_size = ftello(f);
-      fseeko(f,0,SEEK_SET);
-
-      int64_t size = slot_lsites / 2 * 24 * 4;
-      rdata.resize(size);
-
-      assert(total_size % size == 0);
-
-      _Nfull = total_size / size;
-      _v.resize(_Nfull,_v[0]);
-      
-      uint32_t crc = 0x0;
-      GridStopWatch gsw,gsw2;
-      for (int nev = 0;nev < _Nfull;nev++) {
-     
-	gsw.Start();
-	assert(fread(&rdata[0],size,1,f) == 1);
-	gsw.Stop();
-	
-	gsw2.Start();
-	crc = crc32_threaded((unsigned char*)&rdata[0],size,crc);
-	gsw2.Stop();
-      
-	for (int i=0;i<size/4;i++) {
-	  char* c = (char*)&rdata[i];
-	  char tmp; int j;
-	  for (j=0;j<2;j++) {
-	    tmp = c[j]; c[j] = c[3-j]; c[3-j] = tmp;
-	  }
-	}
-	
-	// loop
-	_v[nev].checkerboard = Odd;
-#pragma omp parallel 
-	{
-	  
-	  std::vector<int> lcoor, gcoor, scoor, slcoor;
-	  lcoor.resize(_nd); gcoor.resize(_nd); 
-	  slcoor.resize(_nd); scoor.resize(_nd);
-	  
-#pragma omp for
-	  for (int64_t lidx = 0; lidx < idx.size(); lidx++) {
-	    int llidx = idx[lidx];
-	    Lexicographic::CoorFromIndex(lcoor,llidx,lvol);
-	    for (int i=0;i<_nd;i++) {
-	      gcoor[i] = lcoor[i] + _bgrid._grid->_processor_coor[i]*lvol[i];
-	      scoor[i] = gcoor[i] / slot_lvol[i];
-	      slcoor[i] = gcoor[i] - scoor[i]*slot_lvol[i];
-	    }
-	    
-	    if ((lcoor[1]+lcoor[2]+lcoor[3]+lcoor[4]) % 2 == 1) {
-	      // poke 
-	      sobj sc;
-	      for (int s=0;s<4;s++)
-		for (int c=0;c<3;c++)
-		  sc()(s)(c) = *(std::complex<float>*)&rdata[get_bfm_index(&slcoor[0],c+s*3, &slot_lvol[0] )];
-	      
-	      pokeLocalSite(sc,_v[nev],lcoor);
-	    }
-	    
-	  }
-	}
-      }
-
-      fclose(f);      
-      std::cout << GridLogMessage << "Loading slot " << slot << " with " << idx.size() << " points and " 
-		<< _Nfull << " vectors in "
-		<< gsw.Elapsed() << " at " 
-		<< ( (double)size * _Nfull / 1024./1024./1024. / gsw.useconds()*1000.*1000. )
-		<< " GB/s " << " crc32 = " << std::hex << crc << " crc32_expected = " << crc_exp << std::dec
-		<< " computed at "
-		<< ( (double)size * _Nfull / 1024./1024./1024. / gsw2.useconds()*1000.*1000. )
-		<< " GB/s "
-		<< std::endl;
-      
-      assert(crc == crc_exp);
-    }
-
-    _bgrid._grid->Barrier();
-    std::cout << GridLogMessage  << "Loading complete" << std::endl;
-
-    return true;
-  }
-
-  void write_argonne(const char* dir) {
-
-    char buf[4096];
-
-    assert(!_full_locked);
-
-    if (_bgrid._grid->IsBoss()) {
-      mkdir(dir,ACCESSPERMS);
-      
-      for (int i=0;i<32;i++) {
-	sprintf(buf,"%s/%2.2d",dir,i);
-	mkdir(buf,ACCESSPERMS);
-      }
-    }
-
-    _bgrid._grid->Barrier(); // make sure directories are ready
-
-
-    int nperdir = _bgrid._grid->_Nprocessors / 32;
-    if (nperdir < 1)
-      nperdir=1;
-    std::cout << GridLogMessage << " Write " << dir << " nodes = " << _bgrid._grid->_Nprocessors << std::endl;
-
-    int slot;
-    Lexicographic::IndexFromCoor(_bgrid._grid->_processor_coor,slot,_bgrid._grid->_processors);
-    //printf("Slot: %d <> %d\n",slot, _bgrid._grid->ThisRank());
-
-    sprintf(buf,"%s/%2.2d/%10.10d",dir,slot/nperdir,slot);
-    FILE* f = fopen(buf,"wb");
-    assert(f);
-
-    int N = (int)_v.size();
-    uint32_t crc = 0x0;
-    int64_t cf_size = _bgrid._cf_size;
-    std::vector< float > rdata(cf_size*2);
-
-    GridStopWatch gsw1,gsw2;
-
-    for (int i=0;i<N;i++) {
-      // create buffer and put data in argonne format in there
-      std::vector<int> coor(_bgrid._l.size());
-      for (coor[1] = 0;coor[1]<_bgrid._l[1];coor[1]++) {
-	for (coor[2] = 0;coor[2]<_bgrid._l[2];coor[2]++) {
-	  for (coor[3] = 0;coor[3]<_bgrid._l[3];coor[3]++) {
-	    for (coor[4] = 0;coor[4]<_bgrid._l[4];coor[4]++) {
-	      for (coor[0] = 0;coor[0]<_bgrid._l[0];coor[0]++) {
-
-		if ((coor[1]+coor[2]+coor[3]+coor[4]) % 2 == 1) {
-		  // peek
-		  sobj sc;
-		  peekLocalSite(sc,_v[i],coor);
-		  for (int s=0;s<4;s++)
-		    for (int c=0;c<3;c++)
-		      *(std::complex<float>*)&rdata[get_bfm_index(&coor[0],c+s*3, &_bgrid._l[0] )] = sc()(s)(c);
-		}
-	      }
-	    }
-	  }
-	}
-      }
-	
-      // endian flip
-      for (int i=0;i<cf_size*2;i++) {
-	char* c = (char*)&rdata[i];
-	char tmp; int j;
-	for (j=0;j<2;j++) {
-	  tmp = c[j]; c[j] = c[3-j]; c[3-j] = tmp;
-	}
-      }
-
-      // create crc of buffer
-      gsw1.Start();
-      crc = crc32_threaded((unsigned char*)&rdata[0],cf_size*2*4,crc);    
-      gsw1.Stop();
-
-      // write out
-      gsw2.Start();
-      assert(fwrite(&rdata[0],cf_size*2*4,1,f)==1);
-      gsw2.Stop();
-
-    }
-
-    fclose(f);
-
-
-    // gather crc's and write out
-    std::vector<uint32_t> crcs(_bgrid._grid->_Nprocessors);
-    for (int i=0;i<_bgrid._grid->_Nprocessors;i++) {
-      crcs[i] = 0x0;
-    }
-    crcs[slot] = crc;
-    for (int i=0;i<_bgrid._grid->_Nprocessors;i++) {
-      _bgrid._grid->GlobalSum(crcs[i]);
-    }
-
-    if (_bgrid._grid->IsBoss()) {
-      sprintf(buf,"%s/checksums.txt",dir);
-      FILE* f = fopen(buf,"wt");
-      assert(f);
-      fprintf(f,"00000000\n\n");
-      for (int i =0;i<_bgrid._grid->_Nprocessors;i++)
-	fprintf(f,"%X\n",crcs[i]);
-      fclose(f);
-
-      sprintf(buf,"%s/nodes.txt",dir);
-      f = fopen(buf,"wt");
-      assert(f);
-      for (int i =0;i<(int)_bgrid._grid->_processors.size();i++)
-	fprintf(f,"%d\n",_bgrid._grid->_processors[i]);
-      fclose(f);
-    }
-
-
-    std::cout << GridLogMessage << "Writing slot " << slot << " with "
-	      << N << " vectors in "
-	      << gsw2.Elapsed() << " at " 
-	      << ( (double)cf_size*2*4 * N / 1024./1024./1024. / gsw2.useconds()*1000.*1000. )
-	      << " GB/s  with crc computed at "
-	      << ( (double)cf_size*2*4 * N / 1024./1024./1024. / gsw1.useconds()*1000.*1000. )
-	      << " GB/s "
-	      << std::endl;
-
-    _bgrid._grid->Barrier();
-    std::cout << GridLogMessage  << "Writing complete" << std::endl;
-
-  }
-
-};
-
-
-template<typename Field,typename FieldHP>
-class BlockProjector : public LinearFunction<FieldHP> {
+ template<typename Field>
+class BlockProjector {
 public:
-  BlockedFieldVector<Field,FieldHP>& _evec;
 
-  BlockProjector(BlockedFieldVector<Field,FieldHP>& evec) : _evec(evec) {
+  BasisFieldVector<Field>& _evec;
+  BlockedGrid<Field>& _bgrid;
+
+  BlockProjector(BasisFieldVector<Field>& evec, BlockedGrid<Field>& bgrid) : _evec(evec), _bgrid(bgrid) {
   }
 
-  void operator()(const FieldHP& in, FieldHP& outhp) {
+  void createOrthogonalBasis() {
 
-#if 0
-    FieldHP tmp(_evec._bgrid._grid);
-    tmp = in;
+    GridStopWatch sw;
+    sw.Start();
 
-    outhp = zero;
-
-    outhp.checkerboard = in.checkerboard;
-    tmp.checkerboard = in.checkerboard;
-
-    for (int j=0;j<_evec._Nfull;j++) {
-      FieldHP vj(_evec._bgrid._grid);
-      precisionChange(vj,_evec._v[j]);
+    for (int i=0;i<_evec._Nm;i++) {
+      
+      // |i> -= <j|i> |j>
+      for (int j=0;j<i;j++) {
 
 #pragma omp parallel for
-      for (int b=0;b<_evec._bgrid._o_blocks;b++) {
-	_evec._bgrid.block_caxpy(b,outhp,_evec._bgrid.block_sp(b,vj,tmp),vj,outhp);
+	for (int b=0;b<_bgrid._o_blocks;b++) {
+	  _bgrid.block_caxpy(b,_evec._v[i],-_bgrid.block_sp(b,_evec._v[j],_evec._v[i]),_evec._v[j],_evec._v[i]);
+	}
       }
-
+      
+#pragma omp parallel for
+      for (int b=0;b<_bgrid._o_blocks;b++) {
+	auto nrm = _bgrid.block_sp(b,_evec._v[i],_evec._v[i]);
+	_bgrid.block_cscale(b,1.0 / sqrt(nrm),_evec._v[i]);
+      }
+      
     }
-#else
-    Field tmp(_evec._bgridLP._grid);
-    precisionChange(tmp,in);
+    sw.Stop();
+    std::cout << GridLogMessage << "Gram-Schmidt to create blocked basis took " << sw.Elapsed() << std::endl;
 
-    Field out(_evec._bgridLP._grid);
+  }
+
+  template<typename CoarseField>
+  void coarseToFine(const CoarseField& in, Field& out) {
+
+    out = zero;
+    out.checkerboard = _evec._v[0].checkerboard;
+
+    int Nbasis = sizeof(in._odata[0]._internal._internal) / sizeof(in._odata[0]._internal._internal[0]);
+    assert(Nbasis == _evec._Nm);
+    
+    for (int j=0;j<_evec._Nm;j++) {
+#pragma omp parallel for
+      for (int b=0;b<_bgrid._o_blocks;b++)
+	_bgrid.block_caxpy(b,out,in._odata[b]._internal._internal[j],_evec._v[j],out);
+    }
+    
+  }
+
+  template<typename CoarseField>
+  void fineToCoarse(const Field& in, CoarseField& out) {
+
     out = zero;
 
-    out.checkerboard = in.checkerboard;
-    tmp.checkerboard = in.checkerboard;
+    int Nbasis = sizeof(out._odata[0]._internal._internal) / sizeof(out._odata[0]._internal._internal[0]);
+    assert(Nbasis == _evec._Nm);
 
+    Field tmp(_bgrid._grid);
+    tmp = in;
+    
+    for (int j=0;j<_evec._Nm;j++) {
 #pragma omp parallel for
-    for (int b=0;b<_evec._bgridLP._o_blocks;b++) {
-      for (int j=0;j<_evec._Nfull;j++) {
-	auto v = _evec._bgridLP.block_sp(b,_evec._v[j],tmp);
-	_evec._bgridLP.block_caxpy(b,out,v,_evec._v[j],out);
-	_evec._bgridLP.block_caxpy(b,tmp,-v,_evec._v[j],tmp);
+      for (int b=0;b<_bgrid._o_blocks;b++) {
+	// |rhs> -= <j|rhs> |j>
+	auto c = _bgrid.block_sp(b,_evec._v[j],tmp);
+	_bgrid.block_caxpy(b,tmp,-c,_evec._v[j],tmp); // may make this more numerically stable
+	out._odata[b]._internal._internal[j] = c;
       }
     }
 
-    precisionChange(outhp,out);
-
-#endif
   }
 };
 
+ /*
+  void deflate(const std::vector<RealD>& eval,const std::vector<int>& idx,int N,const Field& src_orig,Field& result) {
+    result = zero;
+    Field tmp(result);
+    for (int i=0;i<N;i++) {
+      int j = idx[i];
+      precisionChange(tmp,get(j));
+      axpy(result,TensorRemove(innerProduct(tmp,src_orig)) / eval[j],tmp,result);
+    }
+  }
+ */
+
+
+ namespace FieldVectorIO {
+
+   // zlib's crc32 gets 0.4 GB/s on KNL single thread
+   // below gets 4.8 GB/s
+   uint32_t crc32_threaded(unsigned char* data, int64_t len, uint32_t previousCrc32 = 0) {
+     
+     return crc32(previousCrc32,data,len);
+     
+     // below needs further tuning/testing
+     std::vector<uint32_t> partials;
+     std::vector<int64_t> lens;
+     int64_t len_part;
+     
+#pragma omp parallel shared(partials,lens,len_part)
+     {
+       int threads = omp_get_num_threads();
+       int thread  = omp_get_thread_num();
+       
+#pragma omp single
+       {
+	 partials.resize(threads);
+	 lens.resize(threads);
+	 assert(len % threads == 0); // for now 64 divides all our data, easy to generalize
+	 len_part = len / threads;
+       }
+       
+#pragma omp barrier
+       
+       partials[thread] = crc32(thread == 0 ? previousCrc32 : 0x0,data + len_part * thread,len_part);
+       lens[thread] = len_part;
+       
+       // reduction
+       while (lens.size() > 1) {
+	 
+	 uint32_t com_val;
+	 int64_t com_len;
+	 if (thread % 2 == 0) {
+	   if (thread + 1 < (int)partials.size()) {
+	     com_val = crc32_combine(partials[thread],partials[thread+1],lens[thread+1]);
+	     com_len = lens[thread] + lens[thread+1];
+	   } else if (thread + 1 == (int)partials.size()) {
+	     com_val = partials[thread];
+	     com_len = lens[thread];
+	   } else {
+	     com_len = -1; // inactive thread
+	   }
+	 } else {
+	   com_len = -1;
+	 }
+	 
+	 //std::cout << "Reducing in thread " << thread << " from lens.size() = " << lens.size() << " found " << com_len << std::endl;
+	 
+#pragma omp barrier
+	 
+#pragma omp single
+	 {
+	   partials.resize(0);
+	   lens.resize(0);
+	 }
+	 
+#pragma omp barrier
+	 
+#pragma omp critical
+	 {
+	   if (com_len != -1) {
+	     partials.push_back(com_val);
+	     lens.push_back(com_len);
+	   }
+	 }
+	 
+#pragma omp barrier
+       }	
+       
+     }
+     
+     return partials[0];
+   }
+
+   int get_bfm_index( int* pos, int co, int* s ) {
+     
+     int ls = s[0];
+     int NtHalf = s[4] / 2;
+     int simd_coor = pos[4] / NtHalf;
+     int regu_coor = (pos[1] + s[1] * (pos[2] + s[2] * ( pos[3] + s[3] * (pos[4] % NtHalf) ) )) / 2;
+     
+     return regu_coor * ls * 48 + pos[0] * 48 + co * 4 + simd_coor * 2;
+   }
+   
+   template<typename Field>
+   bool read_argonne(BasisFieldVector<Field>& ret,const char* dir, const std::vector<int>& cnodes) {
+
+     GridBase* _grid = ret._v[0]._grid;
+
+     // this is slow code to read the argonne file format for debugging purposes
+     std::vector<int> nodes = cnodes;
+     std::vector<int> slot_lvol, lvol;
+     int _nd = (int)nodes.size();
+     int i, ntotal = 1;
+     int64_t lsites = 1;
+     int64_t slot_lsites = 1;
+     for (i=0;i<_nd;i++) {
+       slot_lvol.push_back(_grid->FullDimensions()[i] / nodes[i]);
+       lvol.push_back(_grid->FullDimensions()[i] / _grid->_processors[i]);
+       lsites *= lvol.back();
+       slot_lsites *= slot_lvol.back();
+       ntotal *= nodes[i];
+     }
+
+     int nperdir = ntotal / 32;
+     if (nperdir < 1)
+       nperdir=1;
+     std::cout << GridLogMessage << " Read " << dir << " nodes = " << nodes << std::endl;
+     std::cout << GridLogMessage << " lvol = " << lvol << std::endl;
+     
+     std::map<int, std::vector<int> > slots;
+     
+     
+     {
+       std::vector<int> lcoor, gcoor, scoor;
+       lcoor.resize(_nd); gcoor.resize(_nd);  scoor.resize(_nd);
+       
+       // first create mapping of indices to slots
+       for (int lidx = 0; lidx < lsites; lidx++) {
+	 Lexicographic::CoorFromIndex(lcoor,lidx,lvol);
+	 for (int i=0;i<_nd;i++) {
+	   gcoor[i] = lcoor[i] + _grid->_processor_coor[i]*lvol[i];
+	   scoor[i] = gcoor[i] / slot_lvol[i];
+	 }
+	 int slot;
+	 Lexicographic::IndexFromCoor(scoor,slot,nodes);
+	 auto sl = slots.find(slot);
+	 if (sl == slots.end())
+	   slots[slot] = std::vector<int>();
+	 slots[slot].push_back(lidx);
+       }
+     }
+     
+     // now load one slot at a time and fill the vector
+     for (auto sl=slots.begin();sl!=slots.end();sl++) {
+       std::vector<int>& idx = sl->second;
+       int slot = sl->first;
+       std::vector<float> rdata;
+       
+       char buf[4096];
+       
+       sprintf(buf,"%s/checksums.txt",dir);
+       FILE* f = fopen(buf,"rt");
+       if (!f)
+	 return false;
+       
+       for (int l=0;l<3+slot;l++)
+	 fgets(buf,sizeof(buf),f);
+       uint32_t crc_exp = strtol(buf, NULL, 16);
+       fclose(f);
+       
+       // load one slot vector
+       sprintf(buf,"%s/%2.2d/%10.10d",dir,slot/nperdir,slot);
+       f = fopen(buf,"rb");
+       if (!f)
+	 return false;
+       
+       fseeko(f,0,SEEK_END);
+       off_t total_size = ftello(f);
+       fseeko(f,0,SEEK_SET);
+       
+       int64_t size = slot_lsites / 2 * 24*4;
+       rdata.resize(size);
+       
+       assert(total_size % size == 0);
+       
+       int _Nfull = total_size / size;
+       ret._v.resize(_Nfull,ret._v[0]);
+       ret._Nm = _Nfull;
+       
+       uint32_t crc = 0x0;
+       GridStopWatch gsw,gsw2;
+       for (int nev = 0;nev < _Nfull;nev++) {
+	 
+	 gsw.Start();
+	 assert(fread(&rdata[0],size,1,f) == 1);
+	 gsw.Stop();
+	 
+	 gsw2.Start();
+	 crc = crc32_threaded((unsigned char*)&rdata[0],size,crc);
+	 gsw2.Stop();
+	 
+	 for (int i=0;i<size/4;i++) {
+	   char* c = (char*)&rdata[i];
+	   char tmp; int j;
+	   for (j=0;j<2;j++) {
+	     tmp = c[j]; c[j] = c[3-j]; c[3-j] = tmp;
+	   }
+	 }
+	 
+	 // loop
+	 ret._v[nev].checkerboard = Odd;
+#pragma omp parallel 
+	 {
+	   
+	   std::vector<int> lcoor, gcoor, scoor, slcoor;
+	   lcoor.resize(_nd); gcoor.resize(_nd); 
+	   slcoor.resize(_nd); scoor.resize(_nd);
+	   
+#pragma omp for
+	   for (int64_t lidx = 0; lidx < idx.size(); lidx++) {
+	     int llidx = idx[lidx];
+	     Lexicographic::CoorFromIndex(lcoor,llidx,lvol);
+	     for (int i=0;i<_nd;i++) {
+	       gcoor[i] = lcoor[i] + _grid->_processor_coor[i]*lvol[i];
+	       scoor[i] = gcoor[i] / slot_lvol[i];
+	       slcoor[i] = gcoor[i] - scoor[i]*slot_lvol[i];
+	     }
+	     
+	     if ((lcoor[1]+lcoor[2]+lcoor[3]+lcoor[4]) % 2 == 1) {
+	       // poke 
+	       iScalar<iVector<iVector<ComplexF, 3>, 4> > sc;
+	       for (int s=0;s<4;s++)
+		 for (int c=0;c<3;c++)
+		   sc()(s)(c) = *(std::complex<float>*)&rdata[get_bfm_index(&slcoor[0],c+s*3, &slot_lvol[0] )];
+	       
+	       pokeLocalSite(sc,ret._v[nev],lcoor);
+	     }
+	     
+	   }
+	 }
+       }
+       
+       fclose(f);      
+       std::cout << GridLogMessage << "Loading slot " << slot << " with " << idx.size() << " points and " 
+		 << _Nfull << " vectors in "
+		 << gsw.Elapsed() << " at " 
+		 << ( (double)size * _Nfull / 1024./1024./1024. / gsw.useconds()*1000.*1000. )
+		 << " GB/s " << " crc32 = " << std::hex << crc << " crc32_expected = " << crc_exp << std::dec
+		 << " computed at "
+		 << ( (double)size * _Nfull / 1024./1024./1024. / gsw2.useconds()*1000.*1000. )
+		 << " GB/s "
+		 << std::endl;
+       
+       assert(crc == crc_exp);
+     }
+     
+     _grid->Barrier();
+     std::cout << GridLogMessage  << "Loading complete" << std::endl;
+     
+     return true;
+   }
+   
+   template<typename Field>
+     static void write_argonne(const BasisFieldVector<Field>& ret,const char* dir) {
+     
+     GridBase* _grid = ret._v[0]._grid;
+     std::vector<int> _l = _grid->FullDimensions();
+     for (int i=0;i<(int)_l.size();i++)
+       _l[i] /= _grid->_processors[i];
+
+     char buf[4096];
+     
+     if (_grid->IsBoss()) {
+       mkdir(dir,ACCESSPERMS);
+       
+       for (int i=0;i<32;i++) {
+	 sprintf(buf,"%s/%2.2d",dir,i);
+	 mkdir(buf,ACCESSPERMS);
+       }
+     }
+     
+     _grid->Barrier(); // make sure directories are ready
+
+     
+     int nperdir = _grid->_Nprocessors / 32;
+     if (nperdir < 1)
+       nperdir=1;
+     std::cout << GridLogMessage << " Write " << dir << " nodes = " << _grid->_Nprocessors << std::endl;
+     
+     int slot;
+     Lexicographic::IndexFromCoor(_grid->_processor_coor,slot,_grid->_processors);
+     //printf("Slot: %d <> %d\n",slot, _grid->ThisRank());
+     
+     sprintf(buf,"%s/%2.2d/%10.10d",dir,slot/nperdir,slot);
+     FILE* f = fopen(buf,"wb");
+     assert(f);
+     
+     int N = (int)ret._v.size();
+     uint32_t crc = 0x0;
+     int64_t cf_size = _grid->oSites()*_grid->iSites()*12;
+     std::vector< float > rdata(cf_size*2);
+     
+     GridStopWatch gsw1,gsw2;
+     
+     for (int i=0;i<N;i++) {
+
+       if (ret._v[i].checkerboard != Odd)
+	 continue;
+
+       // create buffer and put data in argonne format in there
+       std::vector<int> coor(_l.size());
+       for (coor[1] = 0;coor[1]<_l[1];coor[1]++) {
+	 for (coor[2] = 0;coor[2]<_l[2];coor[2]++) {
+	   for (coor[3] = 0;coor[3]<_l[3];coor[3]++) {
+	     for (coor[4] = 0;coor[4]<_l[4];coor[4]++) {
+	       for (coor[0] = 0;coor[0]<_l[0];coor[0]++) {
+		 
+		 if ((coor[1]+coor[2]+coor[3]+coor[4]) % 2 == 1) {
+		   // peek
+		   iScalar<iVector<iVector<ComplexF, 3>, 4> > sc;
+		   peekLocalSite(sc,ret._v[i],coor);
+		   for (int s=0;s<4;s++)
+		     for (int c=0;c<3;c++)
+		       *(std::complex<float>*)&rdata[get_bfm_index(&coor[0],c+s*3, &_l[0] )] = sc()(s)(c);
+		 }
+	       }
+	     }
+	   }
+	 }
+       }
+       
+       // endian flip
+       for (int i=0;i<cf_size*2;i++) {
+	 char* c = (char*)&rdata[i];
+	 char tmp; int j;
+	 for (j=0;j<2;j++) {
+	   tmp = c[j]; c[j] = c[3-j]; c[3-j] = tmp;
+	 }
+       }
+       
+       // create crc of buffer
+       gsw1.Start();
+       crc = crc32_threaded((unsigned char*)&rdata[0],cf_size*2*4,crc);    
+       gsw1.Stop();
+       
+       // write out
+       gsw2.Start();
+       assert(fwrite(&rdata[0],cf_size*2*4,1,f)==1);
+       gsw2.Stop();
+       
+     }
+     
+     fclose(f);
+     
+     
+     // gather crc's and write out
+     std::vector<uint32_t> crcs(_grid->_Nprocessors);
+     for (int i=0;i<_grid->_Nprocessors;i++) {
+       crcs[i] = 0x0;
+     }
+     crcs[slot] = crc;
+     for (int i=0;i<_grid->_Nprocessors;i++) {
+       _grid->GlobalSum(crcs[i]);
+     }
+     
+     if (_grid->IsBoss()) {
+       sprintf(buf,"%s/checksums.txt",dir);
+       FILE* f = fopen(buf,"wt");
+       assert(f);
+       fprintf(f,"00000000\n\n");
+       for (int i =0;i<_grid->_Nprocessors;i++)
+	 fprintf(f,"%X\n",crcs[i]);
+       fclose(f);
+       
+       sprintf(buf,"%s/nodes.txt",dir);
+       f = fopen(buf,"wt");
+       assert(f);
+       for (int i =0;i<(int)_grid->_processors.size();i++)
+	 fprintf(f,"%d\n",_grid->_processors[i]);
+       fclose(f);
+     }
+     
+     
+     std::cout << GridLogMessage << "Writing slot " << slot << " with "
+	       << N << " vectors in "
+	       << gsw2.Elapsed() << " at " 
+	       << ( (double)cf_size*2*4 * N / 1024./1024./1024. / gsw2.useconds()*1000.*1000. )
+	       << " GB/s  with crc computed at "
+	       << ( (double)cf_size*2*4 * N / 1024./1024./1024. / gsw1.useconds()*1000.*1000. )
+	       << " GB/s "
+	       << std::endl;
+     
+     _grid->Barrier();
+     std::cout << GridLogMessage  << "Writing complete" << std::endl;
+     
+   }
+   
+ }
 
 /////////////////////////////////////////////////////////////
 // Implicitly restarted lanczos
 /////////////////////////////////////////////////////////////
 
- template<class Field,class FieldHP> 
+ template<class Field> 
     class ImplicitlyRestartedLanczos {
 
     const RealD small = 1.0e-16;
@@ -1143,30 +810,24 @@ public:
     RealD OrthoTime;
 
     RealD eresid;
-
     SortEigen<Field> _sort;
-
-    LinearOperatorBase<Field> &_Linop;
-
-    OperatorFunction<Field>   &_poly;
-
+    LinearFunction<Field> &_HermOp;
+    LinearFunction<Field> &_HermOpTest;
     /////////////////////////
     // Constructor
     /////////////////////////
-    void init(void){};
-    void Abort(int ff, DenseVector<RealD> &evals,  DenseVector<DenseVector<RealD> > &evecs);
 
     ImplicitlyRestartedLanczos(
-			       LinearOperatorBase<Field> &Linop, // op
-			       OperatorFunction<Field> & poly,   // polynmial
+			       LinearFunction<Field> & HermOp,
+			       LinearFunction<Field> & HermOpTest,
 			       int _Nstop, // sought vecs
 			       int _Nk, // sought vecs
 			       int _Nm, // spare vecs
 			       RealD _eresid, // resid in lmdue deficit 
 			       int _Niter, // Max iterations
 			       int _Nminres) :
-      _Linop(Linop),
-      _poly(poly),
+      _HermOp(HermOp),
+      _HermOpTest(HermOpTest),
       Nstop(_Nstop),
       Nk(_Nk),
       Nm(_Nm),
@@ -1178,15 +839,15 @@ public:
     };
 
     ImplicitlyRestartedLanczos(
-				LinearOperatorBase<Field> &Linop, // op
-			       OperatorFunction<Field> & poly,   // polynmial
+			       LinearFunction<Field> & HermOp,
+			       LinearFunction<Field> & HermOpTest,
 			       int _Nk, // sought vecs
 			       int _Nm, // spare vecs
 			       RealD _eresid, // resid in lmdue deficit 
 			       int _Niter, // Max iterations
 			       int _Nminres) : 
-      _Linop(Linop),
-      _poly(poly),
+      _HermOp(HermOp),
+      _HermOpTest(HermOpTest),
       Nstop(_Nk),
       Nk(_Nk),
       Nm(_Nm),
@@ -1197,36 +858,6 @@ public:
       Np = Nm-Nk; assert(Np>0);
     };
 
-    /////////////////////////
-    // Sanity checked this routine (step) against Saad.
-    /////////////////////////
-      void RitzMatrix(BlockedFieldVector<Field,FieldHP>& evec,int k){
-
-#if 0
-      if(1) return;
-
-      GridBase *grid = evec[0]._grid;
-      Field w(grid);
-      std::cout<<GridLogMessage << "RitzMatrix "<<std::endl;
-      for(int i=0;i<k;i++){
-	_poly(_Linop,evec[i],w);
-	std::cout<<GridLogMessage << "["<<i<<"] ";
-	for(int j=0;j<k;j++){
-	  ComplexD in = innerProduct(evec[j],w);
-	  if ( fabs((double)i-j)>1 ) { 
-	    if (abs(in) >1.0e-9 )  { 
-	      std::cout<<GridLogMessage<<"oops"<<std::endl;
-	      abort();
-	    } else 
-	      std::cout<<GridLogMessage << " 0 ";
-	  } else { 
-	    std::cout<<GridLogMessage << " "<<in<<" ";
-	  }
-	}
-	std::cout<<GridLogMessage << std::endl;
-      }
-#endif
-    }
 
 /* Saad PP. 195
 1. Choose an initial vector v1 of 2-norm unity. Set β1 ≡ 0, v0 ≡ 0
@@ -1240,52 +871,29 @@ public:
  */
     void step(DenseVector<RealD>& lmd,
 	      DenseVector<RealD>& lme, 
-	      BlockedFieldVector<Field,FieldHP>& evec,
-	      BlockedField<FieldHP>& w,int Nm,int k,int evec_offset)
+	      BasisFieldVector<Field>& evec,
+	      Field& w,int Nm,int k)
     {
       assert( k< Nm );
 
-      GridStopWatch gsw_g,gsw_p,gsw_pr,gsw_cheb,gsw_o;
+      GridStopWatch gsw_op,gsw_o;
 
-      gsw_g.Start();
-      BlockedField<FieldHP> evec_k = evec.get(k + evec_offset);
-      gsw_g.Stop();
+      Field& evec_k = evec[k];
 
-      Field wLP(evec._v[0]._grid);
-      FieldHP tmp(evec_k._f);
-      Field tmpLP(wLP);
-
-      gsw_pr.Start();
-      evec.updateField(w); // make sure we have a proper field representation of w, we assume here that we started with a properly projected field
-      // TODO: could add a projector on w._f again
-      gsw_pr.Stop();
-
-
-      gsw_cheb.Start();
-      precisionChange(wLP,w._f);
-      _poly(_Linop,wLP,tmpLP);      // 3. wk:=Avk−βkv_{k−1}
-      precisionChange(tmp,tmpLP);
-      gsw_cheb.Stop();
-
-      gsw_pr.Start();
-      w = tmp; // set w to the field
-      if (evec._full_locked) {
-	evec.updateCoeff(w); // get coefficients after projection
-	w._f_current = false; // invalidate field representation which ensures that we are dealing with the projected operator
-      }
-      gsw_pr.Stop();
+      gsw_op.Start();
+      _HermOp(evec_k,w);
+      gsw_op.Stop();
 
       if(k>0){
-	auto evec_kmo = evec.get(k-1 + evec_offset);
-	evec.axpy(w,-lme[k-1],evec_kmo,w);
+	w -= lme[k-1] * evec[k-1];
       }    
 
-      ComplexD zalph = evec.innerProduct(evec_k,w); // 4. αk:=(wk,vk)
+      ComplexD zalph = innerProduct(evec_k,w); // 4. αk:=(wk,vk)
       RealD     alph = real(zalph);
 
-      evec.axpy(w,-alph,evec_k,w);// 5. wk:=wk−αkvk
+      w = w - alph * evec_k;// 5. wk:=wk−αkvk
 
-      RealD beta = evec.normalise(w); // 6. βk+1 := ∥wk∥2. If βk+1 = 0 then Stop
+      RealD beta = normalise(w); // 6. βk+1 := ∥wk∥2. If βk+1 = 0 then Stop
                                  // 7. vk+1 := wk/βk+1
 
       std::cout<<GridLogMessage << "alpha[" << k << "] = " << zalph << " beta[" << k << "] = "<<beta<<std::endl;
@@ -1298,20 +906,15 @@ public:
 
       gsw_o.Start();
       if (k>0) { 
-	orthogonalize(w,evec,k,evec_offset); // orthonormalise
+	orthogonalize(w,evec,k); // orthonormalise
       }
       gsw_o.Stop();
 
-      gsw_p.Start();
       if(k < Nm-1) { 
-	evec.put(k+1 + evec_offset, w);
+	evec[k+1] = w;
       }
-      gsw_p.Stop();
 
-      std::cout << GridLogMessage << "Timing: get=" << gsw_g.Elapsed() <<
-	" put="<< gsw_p.Elapsed() <<
-	" proj=" << gsw_pr.Elapsed() <<
-	" cheb=" << gsw_cheb.Elapsed() <<
+      std::cout << GridLogMessage << "Timing: operator=" << gsw_op.Elapsed() <<
 	" orth=" << gsw_o.Elapsed() << std::endl;
 
     }
@@ -1567,13 +1170,15 @@ public:
       return nn;
     }
 
-    void orthogonalize(BlockedField<FieldHP>& w,
-		       BlockedFieldVector<Field,FieldHP>& evec,
-		       int k, int evec_offset)
+    void orthogonalize(Field& w,
+		       BasisFieldVector<Field>& evec,
+		       int k)
     {
       double t0=-usecond()/1e6;
-      evec.orthogonalize(w,k,evec_offset);
-      evec.normalise(w);
+
+      evec.orthogonalize(w,k);
+
+      normalise(w);
       t0+=usecond()/1e6;
       OrthoTime +=t0;
     }
@@ -1602,19 +1207,16 @@ until convergence
  */
 
     void calc(DenseVector<RealD>& eval,
-	      BlockedFieldVector<Field,FieldHP>& evec,
-	      const FieldHP& src,
-	      int& Nconv,
-	      int evec_offset = 0,
-	      bool test_conv_poly = false)
+	      BasisFieldVector<Field>& evec,
+	      const Field& src,
+	      int& Nconv)
       {
 
-	GridBase *grid = evec._bgrid._grid;//evec.get(0 + evec_offset)._grid;
+	GridBase *grid = evec._v[0]._grid;//evec.get(0 + evec_offset)._grid;
 	assert(grid == src._grid);
 
 	std::cout<<GridLogMessage << " -- Nk = " << Nk << " Np = "<< Np << std::endl;
 	std::cout<<GridLogMessage << " -- Nm = " << Nm << std::endl;
-	std::cout<<GridLogMessage << " -- evec_offset = " << evec_offset << std::endl;
 	std::cout<<GridLogMessage << " -- size of eval   = " << eval.size() << std::endl;
 	std::cout<<GridLogMessage << " -- size of evec  = " << evec.size() << std::endl;
 	
@@ -1627,8 +1229,8 @@ until convergence
 	DenseVector<int>   Iconv(Nm);
 
 
-	BlockedField<FieldHP> f(grid);
-	BlockedField<FieldHP> v(grid);
+	Field f(grid);
+	Field v(grid);
   
 	int k1 = 1;
 	int k2 = Nk;
@@ -1638,32 +1240,18 @@ until convergence
 	RealD beta_k;
   
 	// Set initial vector
-	// (uniform vector) Why not src??
-	//	evec[0] = 1.0;
-	{
-	  FieldHP src_n=src;
-	  normalise(src_n);
-	  BlockedField<FieldHP> bsrc(src_n);
-	  evec.put(0 + evec_offset,bsrc);
-	  std:: cout<<GridLogMessage <<"norm2(src)= " << norm2(src)<<std::endl;
-	}
+	evec[0] = src;
+	normalise(evec[0]);
+	std:: cout<<GridLogMessage <<"norm2(evec[0])= " << norm2(evec[0])<<std::endl;
 	
 	// Initial Nk steps
 	OrthoTime=0.;
 	double t0=usecond()/1e6;
-	for(int k=0; k<Nk; ++k) step(eval,lme,evec,f,Nm,k,evec_offset);
+	for(int k=0; k<Nk; ++k) step(eval,lme,evec,f,Nm,k);
 	double t1=usecond()/1e6;
 	std::cout<<GridLogMessage <<"IRL::Initial steps: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
 	std::cout<<GridLogMessage <<"IRL::Initial steps:OrthoTime "<<OrthoTime<< "seconds"<<std::endl;
-//	std:: cout<<GridLogMessage <<"norm2(evec[1])= " << norm2(evec[1]) << std::endl;
-//	std:: cout<<GridLogMessage <<"norm2(evec[2])= " << norm2(evec[2]) << std::endl;
-	RitzMatrix(evec,Nk);
 	t1=usecond()/1e6;
-	std::cout<<GridLogMessage <<"IRL::RitzMatrix: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
-	for(int k=0; k<Nk; ++k){
-//	std:: cout<<GridLogMessage <<"eval " << k << " " <<eval[k] << std::endl;
-//	std:: cout<<GridLogMessage <<"lme " << k << " " << lme[k] << std::endl;
-	}
 
 	// Restarting loop begins
 	for(int iter = 0; iter<Niter; ++iter){
@@ -1675,15 +1263,14 @@ until convergence
 	  // We loop over 
 	  //
 	  OrthoTime=0.;
-	  for(int k=Nk; k<Nm; ++k) step(eval,lme,evec,f,Nm,k,evec_offset);
+	  for(int k=Nk; k<Nm; ++k) step(eval,lme,evec,f,Nm,k);
 	  t1=usecond()/1e6;
 	  std::cout<<GridLogMessage <<"IRL:: "<<Np <<" steps: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
 	  std::cout<<GridLogMessage <<"IRL::Initial steps:OrthoTime "<<OrthoTime<< "seconds"<<std::endl;
-	  evec.scale(lme[Nm-1],f);
+	  f *= lme[Nm-1];
 	  
-	  RitzMatrix(evec,k2);
 	  t1=usecond()/1e6;
-	  std::cout<<GridLogMessage <<"IRL:: RitzMatrix: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
+
 	  
 	  // getting eigenvalues
 	  for(int k=0; k<Nm; ++k){
@@ -1717,24 +1304,21 @@ until convergence
 
 	  assert(k2<Nm);
 	  assert(k1>0);
-	  evec.rotate(Qt,k1-1,k2+1,0,Nm,Nm,evec_offset);
+	  evec.rotate(Qt,k1-1,k2+1,0,Nm,Nm);
 	  
 	  t1=usecond()/1e6;
 	  std::cout<<GridLogMessage <<"IRL::QR rotation: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
 	  fflush(stdout);
 	  
 	  // Compressed vector f and beta(k2)
-	  evec.scale(Qt[Nm-1+Nm*(k2-1)],f);
-	  auto evec_k2 = evec.get(k2 + evec_offset);
-	  evec.axpy(f,lme[k2-1],evec_k2,f);
-	  beta_k = evec.innerProduct(f,f).real();
+	  f *= Qt[Nm-1+Nm*(k2-1)];
+	  f += lme[k2-1] * evec[k2];
+	  beta_k = norm2(f);
 	  beta_k = sqrt(beta_k);
 	  std::cout<<GridLogMessage<<" beta(k) = "<<beta_k<<std::endl;
 	  
 	  RealD betar = 1.0/beta_k;
-	  auto fprime = f;
-	  evec.scale(betar,f);
-	  evec.put(k2 + evec_offset, fprime);
+	  evec[k2] = betar * f;
 	  lme[k2-1] = beta_k;
 	  
 	  // Convergence test
@@ -1753,62 +1337,32 @@ until convergence
 	  if (iter >= Nminres) {
 	    std::cout << GridLogMessage << "Rotation to test convergence " << std::endl;
 	    
-	    FieldHP ev0_orig(grid);
-	    ev0_orig = evec.getField(0 + evec_offset);
+	    Field ev0_orig(grid);
+	    ev0_orig = evec[0];
 	    
-	    evec.rotate(Qt,0,Nk,0,Nk,Nm,evec_offset);
+	    evec.rotate(Qt,0,Nk,0,Nk,Nm);
 	    
 	    {
 	      std::cout << GridLogMessage << "Test convergence" << std::endl;
-	      FieldHP B(grid);
+	      Field B(grid);
 	      
 	      for(int j = 0; j<Nk; ++j){
-		B=evec.getField(j + evec_offset);
-		//B.checkerboard = evec.get(0 + evec_offset).checkerboard;
-		//std::cout << GridLogMessage << "Checkerboard: " << B.checkerboard << " norm2 = " << norm2(B) << std::endl;
+		B=evec[j];
+		//std::cout << "Checkerboard: " << evec[j].checkerboard << std::endl; 
+		B.checkerboard = evec[0].checkerboard;
+
+		_HermOpTest(B,v);
 		
-		/*{
-		  auto res = B._odata[0];
-		  std::cout << GridLogMessage << " ev = " << res << std::endl;
-		  }*/
-		FieldHP tmp(B);
-		Field   tmpLP(evec._v[0]._grid);
-		Field   vLP(tmpLP);
-		FieldHP vHP(tmp);
-		if (evec._full_locked) {
-		  BlockProjector<Field,FieldHP> _proj(evec);
-		  _proj(B,vHP);
-		} else {
-		  vHP = B;
-		}
-		precisionChange(vLP,vHP);
-		if (!test_conv_poly)
-		  _Linop.HermOp(vLP,tmpLP);
-		else
-		  _poly(_Linop,vLP,tmpLP);      // 3. wk:=Avk−βkv_{k−1}
-		precisionChange(tmp,tmpLP);
-		if (evec._full_locked) {
-		  BlockProjector<Field,FieldHP> _proj(evec);
-		  _proj(tmp,vHP);
-		} else {
-		  vHP = tmp;
-		}
-		
-		RealD vnum = real(innerProduct(B,vHP)); // HermOp.
+		RealD vnum = real(innerProduct(B,v)); // HermOp.
 		RealD vden = norm2(B);
-		RealD vv0 = norm2(vHP);
+		RealD vv0 = norm2(v);
 		eval2[j] = vnum/vden;
-		vHP -= eval2[j]*B;
-		RealD vv = norm2(vHP);
-		std::string xtr;
-		if (test_conv_poly) {
-		  vv /= ::pow(eval2[j],2.0);
-		  xtr = "/ eval[i]^2 ";
-		}
+		v -= eval2[j]*B;
+		RealD vv = norm2(v);
 		std::cout.precision(13);
 		std::cout<<GridLogMessage << "[" << std::setw(3)<< std::setiosflags(std::ios_base::right) <<j<<"] "
 			 <<"eval = "<<std::setw(25)<< std::setiosflags(std::ios_base::left)<< eval2[j]
-			 <<" |H B[i] - eval[i]B[i]|^2 " << xtr << std::setw(25)<< std::setiosflags(std::ios_base::right)<< vv
+			 <<" |H B[i] - eval[i]B[i]|^2 " << std::setw(25)<< std::setiosflags(std::ios_base::right)<< vv
 			 <<" "<< vnum/(sqrt(vden)*sqrt(vv0))
 			 << " norm(B["<<j<<"])="<< vden <<std::endl;
 		
@@ -1847,9 +1401,9 @@ until convergence
 		
 		RealD res_check_rotate_inverse = (qm*qmI - Eigen::MatrixXd::Identity(Nk,Nk)).norm(); // sqrt( |X|^2 )
 		assert(res_check_rotate_inverse < 1e-7);
-		evec.rotate(QtI,0,Nk,0,Nk,Nm,evec_offset);
+		evec.rotate(QtI,0,Nk,0,Nk,Nm);
 		
-		axpy(ev0_orig,-1.0,evec.getField(0 + evec_offset),ev0_orig);
+		axpy(ev0_orig,-1.0,evec[0],ev0_orig);
 		std::cout << GridLogMessage << "Rotation done (in " << timeInv.Elapsed() << " = " << timeInv.useconds() << " us" <<
 		  ", error = " << res_check_rotate_inverse << 
 		  "); | evec[0] - evec[0]_orig | = " << ::sqrt(norm2(ev0_orig)) << std::endl;
@@ -1876,7 +1430,7 @@ until convergence
 	 
 	 // test
 	 for (int j=0;j<Nconv;j++) {
-	   std::cout<<GridLogMessage << " |e[" << j << "]|^2 = " << norm2(evec.getField(j + evec_offset)) << std::endl;
+	   std::cout<<GridLogMessage << " |e[" << j << "]|^2 = " << norm2(evec[j]) << std::endl;
 	 }
        }
        

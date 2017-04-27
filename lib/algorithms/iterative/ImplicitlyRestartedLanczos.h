@@ -1373,7 +1373,7 @@ until convergence
 		RealD vv0 = norm2(v);
 		eval2[j] = vnum/vden;
 		v -= eval2[j]*B;
-		RealD vv = norm2(v) / pow(evalMaxApprox,2.0);
+		RealD vv = norm2(v) / ::pow(evalMaxApprox,2.0);
 		std::cout.precision(13);
 		std::cout<<GridLogMessage << "[" << std::setw(3)<< std::setiosflags(std::ios_base::right) <<j<<"] "
 			 <<"eval = "<<std::setw(25)<< std::setiosflags(std::ios_base::left)<< eval2[j]

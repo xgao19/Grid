@@ -387,19 +387,20 @@ public:
     }
 
   }
-};
 
- /*
-  void deflate(const std::vector<RealD>& eval,const std::vector<int>& idx,int N,const Field& src_orig,Field& result) {
+  template<typename CoarseField>
+    void deflate(BasisFieldVector<CoarseField>& _coef,const std::vector<RealD>& eval,const std::vector<int>& idx,int N,const Field& src_orig,Field& result) {
     result = zero;
-    Field tmp(result);
     for (int i=0;i<N;i++) {
       int j = idx[i];
-      precisionChange(tmp,get(j));
+      Field tmp(result._grid);
+      coarseToFine(_coef._v[j],tmp);
       axpy(result,TensorRemove(innerProduct(tmp,src_orig)) / eval[j],tmp,result);
     }
   }
- */
+
+};
+
 
 
  namespace FieldVectorIO {
@@ -1241,7 +1242,6 @@ until convergence
 	DenseVector<RealD> lme2(Nm);
 	DenseVector<RealD> eval2(Nm);
 	DenseVector<RealD> Qt(Nm*Nm);
-	DenseVector<int>   Iconv(Nm);
 
 
 	Field f(grid);
@@ -1383,7 +1383,6 @@ until convergence
 		
 		// change the criteria as evals are supposed to be sorted, all evals smaller(larger) than Nstop should have converged
 		if((vv<eresid*eresid) && (j == Nconv) ){
-		  Iconv[Nconv] = j;
 		  ++Nconv;
 		}
 	      }
@@ -1433,16 +1432,10 @@ until convergence
 	abort();
 	
       converged:
-       // Sorting
 
-       eval.resize(Nconv);
-
-       for(int i=0; i<Nconv; ++i)
-         //eval[i] = eval2[Iconv[i]];
-	 eval[i] = eval2[i]; // for now just take the lowest Nconv, should be fine the way Lanc converges
-       
-       {
-	 
+	eval = eval2;
+	{
+	  
 	 // test
 	 for (int j=0;j<Nconv;j++) {
 	   std::cout<<GridLogMessage << " |e[" << j << "]|^2 = " << norm2(evec[j]) << std::endl;

@@ -224,6 +224,62 @@ public:
       }
     }
 
+    void getCanonicalBlockOffset(int cb, std::vector<int>& x0) {
+      const int ndim = 5;
+      assert(_nb.size() == ndim);
+      std::vector<int> _nbc = { _nb[1], _nb[2], _nb[3], _nb[4], _nb[0] };
+      std::vector<int> _bsc = { _bs_cb[1], _bs_cb[2], _bs_cb[3], _bs_cb[4], _bs_cb[0] };
+      x0.resize(ndim);
+
+      assert(cb >= 0);
+      assert(cb < _nbc[0]*_nbc[1]*_nbc[2]*_nbc[3]*_nbc[4]);
+
+      Lexicographic::CoorFromIndex(x0,cb,_nbc);
+      int i;
+
+      for (i=0;i<ndim;i++) {
+	x0[i] *= _bsc[i];
+      }
+    }
+
+    void peekBlockOfVectorCanonical(int cb,const Field& v,std::vector<float>& buf) {
+      std::vector<int> _bsc = { _bs_cb[1], _bs_cb[2], _bs_cb[3], _bs_cb[4], _bs_cb[0] };
+      std::vector<int> ldim = v._grid->LocalDimensions();
+      std::vector<int> cldim = { ldim[1], ldim[2], ldim[3], ldim[4], ldim[0] };
+      const int _nbsc = _bsc[0]*_bsc[1]*_bsc[2]*_bsc[3]*_bsc[4];
+      // take canonical block cb of v and put it in canonical ordering in buf
+      std::vector<int> cx0;
+      getCanonicalBlockOffset(cb,cx0);
+
+      buf.resize(_cf_block_size * 2);
+
+#pragma omp parallel
+      {
+	std::vector<int> co0,cl0;
+	co0=cx0; cl0=cx0;
+
+#pragma omp for
+	for (int i=0;i<_nbsc;i++) {
+	  Lexicographic::CoorFromIndex(co0,i,_bsc);
+	  for (int j=0;j<(int)_bsc.size();j++)
+	    cl0[j] = cx0[j] + co0[j];
+	  
+	  std::vector<int> l0 = { cl0[4], cl0[0], cl0[1], cl0[2], cl0[3] };
+	  int oi = v._grid->oIndex(l0);
+	  int ii = v._grid->iIndex(l0);
+	  int lti = i;
+	  
+	  for (int s=0;s<4;s++)
+	    for (int c=0;c<3;c++) {
+	      Coeff_t& ld = ((Coeff_t*)&v._odata[oi]._internal._internal[s]._internal[c])[ii];
+	      int ti = 12*lti + 3*s + c;
+	      buf[2*ti+0] = ld.real();
+	      buf[2*ti+1] = ld.imag();
+	    }
+	}
+      }
+    }
+
 };
 
 
@@ -648,6 +704,312 @@ public:
      std::cout << GridLogMessage  << "Loading complete" << std::endl;
      
      return true;
+   }
+
+   void write_bytes(void* buf, int64_t s, FILE* f, uint32_t& crc) {
+     static double data_counter = 0.0;
+
+     if (s == 0)
+       return;
+
+     // checksum
+     crc = crc32_threaded((unsigned char*)buf,s,crc);
+
+     GridStopWatch gsw;
+     gsw.Start();
+     if (fwrite(buf,s,1,f) != 1) {
+       fprintf(stderr,"Write failed of %g GB!\n",(double)s / 1024./1024./1024.);
+       exit(2);
+     }
+     gsw.Stop();
+     double secs = gsw.useconds() / 1000.0 / 1000.0;
+     data_counter += (double)s;
+     if (data_counter > 1024.*1024.*256) {
+       printf("Writing at %g GB/s\n",(double)s / 1024./1024./1024. / secs);
+       data_counter = 0.0;
+     }
+   }
+
+   void write_floats(FILE* f, uint32_t& crc, float* buf, int64_t n) {
+     write_bytes(buf,n*sizeof(float),f,crc);
+   }
+
+   int fp_map(float in, float min, float max, int N) {
+     // Idea:
+     //
+     // min=-6
+     // max=6
+     //
+     // N=1
+     // [-6,0] -> 0, [0,6] -> 1;  reconstruct 0 -> -3, 1-> 3
+     //
+     // N=2
+     // [-6,-2] -> 0, [-2,2] -> 1, [2,6] -> 2;  reconstruct 0 -> -4, 1->0, 2->4
+     int ret =  (int) ( (float)(N+1) * ( (in - min) / (max - min) ) );
+     if (ret == N+1) {
+       ret = N;
+     }
+     return ret;
+   }
+
+   float fp_unmap(int val, float min, float max, int N) {
+     return min + (float)(val + 0.5) * (max - min)  / (float)( N + 1 );
+   }
+
+#define SHRT_UMAX 65535
+#define FP16_BASE 1.4142135623730950488
+#define FP16_COEF_EXP_SHARE_FLOATS 10
+   float unmap_fp16_exp(unsigned short e) {
+     float de = (float)((int)e - SHRT_UMAX / 2);
+     return ::pow( FP16_BASE, de );
+   }
+
+   // can assume that v >=0 and need to guarantee that unmap_fp16_exp(map_fp16_exp(v)) >= v
+   unsigned short map_fp16_exp(float v) {
+     // float has exponents 10^{-44.85} .. 10^{38.53}
+     int exp = (int)ceil(::log(v) / ::log(FP16_BASE)) + SHRT_UMAX / 2;
+     if (exp < 0 || exp > SHRT_UMAX) {
+       fprintf(stderr,"Error in map_fp16_exp(%g,%d)\n",v,exp);
+       exit(3);
+     }
+
+     return (unsigned short)exp;
+   }
+  
+   template<typename OPT>
+     void read_floats_fp16(char* & ptr, OPT* out, int64_t n, int nsc) {
+
+     int64_t nsites = n / nsc;
+     if (n % nsc) {
+       fprintf(stderr,"Invalid size in write_floats_fp16\n");
+       exit(4);
+     }
+
+     unsigned short* in = (unsigned short*)ptr;
+     ptr += 2*(n+nsites);
+
+     // do for each site
+     for (int64_t site = 0;site<nsites;site++) {
+
+       OPT* ev = &out[site*nsc];
+
+       unsigned short* bptr = &in[site*(nsc + 1)];
+
+       unsigned short exp = *bptr++;
+       OPT max = unmap_fp16_exp(exp);
+       OPT min = -max;
+
+       for (int i=0;i<nsc;i++) {
+	 ev[i] = fp_unmap( *bptr++, min, max, SHRT_UMAX );
+       }
+
+     }
+
+   }
+
+   template<typename OPT>
+   void write_floats_fp16(FILE* f, uint32_t& crc, OPT* in, int64_t n, int nsc) {
+
+     int64_t nsites = n / nsc;
+     if (n % nsc) {
+       fprintf(stderr,"Invalid size in write_floats_fp16\n");
+       exit(4);
+     }
+
+     unsigned short* buf = (unsigned short*)malloc( sizeof(short) * (n + nsites) );
+     if (!buf) {
+       fprintf(stderr,"Out of mem\n");
+       exit(1);
+     }
+
+     // do for each site
+#pragma omp parallel for
+     for (int64_t site = 0;site<nsites;site++) {
+
+       OPT* ev = &in[site*nsc];
+
+       unsigned short* bptr = &buf[site*(nsc + 1)];
+
+       OPT max = fabs(ev[0]);
+       OPT min;
+
+       for (int i=0;i<nsc;i++) {
+	 if (fabs(ev[i]) > max)
+	   max = fabs(ev[i]);
+       }
+
+       unsigned short exp = map_fp16_exp(max);
+       max = unmap_fp16_exp(exp);
+       min = -max;
+
+       *bptr++ = exp;
+
+       for (int i=0;i<nsc;i++) {
+	 int val = fp_map( ev[i], min, max, SHRT_UMAX );
+	 if (val < 0 || val > SHRT_UMAX) {
+	   fprintf(stderr,"Assert failed: val = %d (%d), ev[i] = %.15g, max = %.15g, exp = %d\n",val,SHRT_UMAX,ev[i],max,(int)exp);
+	   exit(48);
+	 }
+	 *bptr++ = (unsigned short)val;
+       }
+
+     }
+
+     write_bytes(buf,sizeof(short)*(n + nsites),f,crc);
+
+     free(buf);
+   }
+
+
+   template<typename Field,typename CoarseField>
+     static void write_compressed_vectors(const char* dir,const BlockProjector<Field>& pr,const BasisFieldVector<CoarseField>& coef,int nsingle) {
+
+     GridStopWatch gsw;
+     
+     const BasisFieldVector<Field>& basis = pr._evec;
+     GridBase* _grid = basis._v[0]._grid;
+     std::vector<int> _l = _grid->FullDimensions();
+     for (int i=0;i<(int)_l.size();i++)
+       _l[i] /= _grid->_processors[i];
+
+     _grid->Barrier();
+     gsw.Start();
+
+     char buf[4096];
+     
+     if (_grid->IsBoss()) {
+       mkdir(dir,ACCESSPERMS);
+       
+       for (int i=0;i<32;i++) {
+	 sprintf(buf,"%s/%2.2d",dir,i);
+	 mkdir(buf,ACCESSPERMS);
+       }
+     }
+     
+     _grid->Barrier(); // make sure directories are ready
+
+     typedef typename Field::scalar_type Coeff_t;
+     typedef typename CoarseField::scalar_type CoeffCoarse_t;
+     
+     int nperdir = _grid->_Nprocessors / 32;
+     if (nperdir < 1)
+       nperdir=1;
+     std::cout << GridLogMessage << " Write " << dir << " nodes = " << _grid->_Nprocessors << std::endl;
+     
+     int slot;
+     Lexicographic::IndexFromCoor(_grid->_processor_coor,slot,_grid->_processors);
+     
+     sprintf(buf,"%s/%2.2d/%10.10d",dir,slot/nperdir,slot);
+     FILE* f = fopen(buf,"wb");
+     assert(f);
+
+     uint32_t crc = 0x0;
+
+     int nsingleCap = nsingle;
+     if (pr._evec.size() < nsingleCap)
+       nsingleCap = pr._evec.size();
+
+     // first write single precision basis vectors
+     for (int nb=0;nb<pr._bgrid._blocks;nb++) {
+       for (int i=0;i<nsingleCap;i++) {
+	 std::vector<float> buf;
+	 pr._bgrid.peekBlockOfVectorCanonical(nb,pr._evec._v[i],buf);
+
+#if 0
+	 {
+	   RealD nrm = 0.0;
+	   for (int j=0;j<(int)buf.size();j++)
+	     nrm += buf[j]*buf[j];
+	   std::cout << GridLogMessage << "Norm: " << nrm << std::endl;
+	 }
+#endif
+	 write_floats(f,crc, &buf[0], buf.size() );
+       }
+     }
+
+     // then write fixed precision basis vectors
+     for (int nb=0;nb<pr._bgrid._blocks;nb++) {
+       for (int i=nsingleCap;i<(int)pr._evec.size();i++) {
+	 std::vector<float> buf;
+	 pr._bgrid.peekBlockOfVectorCanonical(nb,pr._evec._v[i],buf);
+	 write_floats_fp16(f,crc, &buf[0], buf.size(), 24);
+       }
+     }
+
+     for (int j=0;j<(int)coef.size();j++)
+       for (int nb=0;nb<pr._bgrid._blocks;nb++) {
+	 // get local coordinate on coarse grid
+	 int ii,oi;
+
+	 int l;
+	 std::vector<float> buf;
+	 for (l=0;l<nsingle;l++) {
+	   auto res = ((CoeffCoarse_t*)&coef._v[j]._odata[oi]._internal._internal[l])[ii];
+	   buf.push_back(res.real());
+	   buf.push_back(res.imag());
+	 }
+	 write_floats(f,crc, &buf[0], buf.size() );
+	 buf.clear();
+	 for (l=nsingle;l<(int)coef.size();l++) {
+	   auto res = ((CoeffCoarse_t*)&coef._v[j]._odata[oi]._internal._internal[l])[ii];
+	   buf.push_back(res.real());
+	   buf.push_back(res.imag());
+	 }
+	 write_floats_fp16(f,crc, &buf[0], buf.size(), FP16_COEF_EXP_SHARE_FLOATS);
+       }
+     
+
+     _grid->Barrier();
+     gsw.Stop();
+
+     int64_t off = ftello(f);
+     RealD totalGB = (RealD)off / 1024./1024./1024 * _grid->_Nprocessors;
+     RealD seconds = gsw.useconds() / 1e6;
+     std::cout << GridLogMessage << "Write " << totalGB << " GB of compressed data at " << totalGB/seconds << " GB/s" << std::endl;
+     fclose(f);
+     /*
+       metadata.txt
+
+       crc32[0...numberofslots-1] = 57178492
+       s[0] = 8  # local volume size
+       s[1] = 4
+       s[2] = 4
+       s[3] = 8
+       s[4] = 10   # 4 = s direction
+       b[0] = 2  # block size
+       b[1] = 2
+       b[2] = 2
+       b[3] = 2
+       b[4] = 1
+       nb[0] = 4
+       nb[1] = 2
+       nb[2] = 2
+       nb[3] = 4
+       nb[4] = 10 # number of blocks (consistent with above)
+       neig = 100          # total number of eigenvectors
+       nkeep = 100         # basis size
+       nkeep_single = 100  # nsingle
+       blocks = 640        # number of blocks
+       FP16_COEF_EXP_SHARE_FLOATS = 10 # group n elements for FP16-exponent for coefficients (24 floats for basis vectors)
+
+
+      int _t = (int64_t)f_size_block * (args.nkeep - nkeep_fp16);
+      for (nb=0;nb<args.blocks;nb++)
+      write_floats(f,crc,  &block_data_ortho[nb][0], _t );
+      
+      begin_fp16_evec = ftello(f);
+      
+      for (nb=0;nb<args.blocks;nb++)
+      write_floats_fp16(f,crc,  &block_data_ortho[nb][ _t ], (int64_t)f_size_block * nkeep_fp16, 24 );
+      
+int j;
+      for (j=0;j<neig;j++)
+      for (nb=0;nb<args.blocks;nb++) {
+        write_floats(f,crc,  &block_coef[nb][2*args.nkeep*j], 2*(args.nkeep - nkeep_fp16) );
+	  write_floats_fp16(f,crc,  &block_coef[nb][2*args.nkeep*j + 2*(args.nkeep - nkeep_fp16) ], 2*nkeep_fp16 , FP16_COEF_EXP_SHARE_FLOATS);
+	  }
+      
+     */
    }
    
    template<typename Field>

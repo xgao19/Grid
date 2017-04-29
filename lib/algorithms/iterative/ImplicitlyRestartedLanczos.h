@@ -537,7 +537,7 @@ public:
      return partials[0];
    }
 
-   int get_bfm_index( int* pos, int co, int* s ) {
+   static int get_bfm_index( int* pos, int co, int* s ) {
      
      int ls = s[0];
      int NtHalf = s[4] / 2;
@@ -548,7 +548,7 @@ public:
    }
    
    template<typename Field>
-   bool read_argonne(BasisFieldVector<Field>& ret,const char* dir, const std::vector<int>& cnodes) {
+     static bool read_argonne(BasisFieldVector<Field>& ret,const char* dir, const std::vector<int>& cnodes) {
 
      GridBase* _grid = ret._v[0]._grid;
 
@@ -706,7 +706,7 @@ public:
      return true;
    }
 
-   void write_bytes(void* buf, int64_t s, FILE* f, uint32_t& crc) {
+   static void write_bytes(void* buf, int64_t s, FILE* f, uint32_t& crc) {
      static double data_counter = 0.0;
 
      if (s == 0)
@@ -730,11 +730,11 @@ public:
      }
    }
 
-   void write_floats(FILE* f, uint32_t& crc, float* buf, int64_t n) {
+   static void write_floats(FILE* f, uint32_t& crc, float* buf, int64_t n) {
      write_bytes(buf,n*sizeof(float),f,crc);
    }
 
-   int fp_map(float in, float min, float max, int N) {
+   static int fp_map(float in, float min, float max, int N) {
      // Idea:
      //
      // min=-6
@@ -752,20 +752,20 @@ public:
      return ret;
    }
 
-   float fp_unmap(int val, float min, float max, int N) {
+   static float fp_unmap(int val, float min, float max, int N) {
      return min + (float)(val + 0.5) * (max - min)  / (float)( N + 1 );
    }
 
 #define SHRT_UMAX 65535
 #define FP16_BASE 1.4142135623730950488
 #define FP16_COEF_EXP_SHARE_FLOATS 10
-   float unmap_fp16_exp(unsigned short e) {
+   static float unmap_fp16_exp(unsigned short e) {
      float de = (float)((int)e - SHRT_UMAX / 2);
      return ::pow( FP16_BASE, de );
    }
 
    // can assume that v >=0 and need to guarantee that unmap_fp16_exp(map_fp16_exp(v)) >= v
-   unsigned short map_fp16_exp(float v) {
+   static unsigned short map_fp16_exp(float v) {
      // float has exponents 10^{-44.85} .. 10^{38.53}
      int exp = (int)ceil(::log(v) / ::log(FP16_BASE)) + SHRT_UMAX / 2;
      if (exp < 0 || exp > SHRT_UMAX) {
@@ -777,7 +777,7 @@ public:
    }
   
    template<typename OPT>
-     void read_floats_fp16(char* & ptr, OPT* out, int64_t n, int nsc) {
+     static void read_floats_fp16(char* & ptr, OPT* out, int64_t n, int nsc) {
 
      int64_t nsites = n / nsc;
      if (n % nsc) {
@@ -808,7 +808,7 @@ public:
    }
 
    template<typename OPT>
-   void write_floats_fp16(FILE* f, uint32_t& crc, OPT* in, int64_t n, int nsc) {
+   static void write_floats_fp16(FILE* f, uint32_t& crc, OPT* in, int64_t n, int nsc) {
 
      int64_t nsites = n / nsc;
      if (n % nsc) {
@@ -860,9 +860,24 @@ public:
      free(buf);
    }
 
+   template<typename Field,typename CoarseField>
+     static bool read_compressed_vectors(const char* dir,const BlockProjector<Field>& pr,const BasisFieldVector<CoarseField>& coef) {
+     return false;
+   }
+
+   static bool DirectoryExists(const char *path) {
+     struct stat info;
+     return ((stat( path, &info ) == 0) && (info.st_mode & S_IFDIR));
+   }
+
+   static void conditionalMkDir(const char* path) {
+     if (!DirectoryExists(path))
+       mkdir(path,ACCESSPERMS);
+   }
 
    template<typename Field,typename CoarseField>
-     static void write_compressed_vectors(const char* dir,const BlockProjector<Field>& pr,const BasisFieldVector<CoarseField>& coef,int nsingle) {
+   static void write_compressed_vectors(const char* dir,const BlockProjector<Field>& pr,const BasisFieldVector<CoarseField>& coef,
+					const std::vector<int>& idx, int nsingle,int writer_nodes = 0) {
 
      GridStopWatch gsw;
      
@@ -877,16 +892,24 @@ public:
 
      char buf[4096];
      
-     if (_grid->IsBoss()) {
-       mkdir(dir,ACCESSPERMS);
-       
-       for (int i=0;i<32;i++) {
-	 sprintf(buf,"%s/%2.2d",dir,i);
-	 mkdir(buf,ACCESSPERMS);
+     // Making the directories is somewhat tricky.
+     // If we run on a joint filesystem we would just 
+     // have the boss create the directories and then
+     // have a barrier.  We also want to be able to run
+     // on local /scratch, so potentially all nodes need
+     // to create their own directories.  So do the following
+     // for now.
+     for (int j=0;j<_grid->_Nprocessors;j++) {
+       if (j == _grid->ThisRank()) {
+	 conditionalMkDir(dir);
+	 for (int i=0;i<32;i++) {
+	   sprintf(buf,"%s/%2.2d",dir,i);
+	   conditionalMkDir(buf);
+	 }       
+	 _grid->Barrier(); // make sure directories are ready
        }
      }
      
-     _grid->Barrier(); // make sure directories are ready
 
      typedef typename Field::scalar_type Coeff_t;
      typedef typename CoarseField::scalar_type CoeffCoarse_t;
@@ -894,122 +917,123 @@ public:
      int nperdir = _grid->_Nprocessors / 32;
      if (nperdir < 1)
        nperdir=1;
-     std::cout << GridLogMessage << " Write " << dir << " nodes = " << _grid->_Nprocessors << std::endl;
-     
+
      int slot;
      Lexicographic::IndexFromCoor(_grid->_processor_coor,slot,_grid->_processors);
-     
-     sprintf(buf,"%s/%2.2d/%10.10d",dir,slot/nperdir,slot);
-     FILE* f = fopen(buf,"wb");
-     assert(f);
 
+     int64_t off = 0x0;
      uint32_t crc = 0x0;
+     if (writer_nodes < 1)
+       writer_nodes = _grid->_Nprocessors;
+     int groups = _grid->_Nprocessors / writer_nodes;
+     if (groups<1)
+       groups = 1;
 
-     int nsingleCap = nsingle;
-     if (pr._evec.size() < nsingleCap)
-       nsingleCap = pr._evec.size();
+     std::cout << GridLogMessage << " Write " << dir << " nodes = " << writer_nodes << std::endl;
 
-     // first write single precision basis vectors
-     for (int nb=0;nb<pr._bgrid._blocks;nb++) {
-       for (int i=0;i<nsingleCap;i++) {
-	 std::vector<float> buf;
-	 pr._bgrid.peekBlockOfVectorCanonical(nb,pr._evec._v[i],buf);
-
+     for (int group=0;group<groups;group++) {
+       _grid->Barrier();
+       if (_grid->ThisRank() % groups == group) {
+	 
+	 sprintf(buf,"%s/%2.2d/%10.10d",dir,slot/nperdir,slot);
+	 FILE* f = fopen(buf,"wb");
+	 assert(f);
+	 	 
+	 int nsingleCap = nsingle;
+	 if (pr._evec.size() < nsingleCap)
+	   nsingleCap = pr._evec.size();
+	 
+	 // first write single precision basis vectors
+	 for (int nb=0;nb<pr._bgrid._blocks;nb++) {
+	   for (int i=0;i<nsingleCap;i++) {
+	     std::vector<float> buf;
+	     pr._bgrid.peekBlockOfVectorCanonical(nb,pr._evec._v[i],buf);
+	     
 #if 0
-	 {
-	   RealD nrm = 0.0;
-	   for (int j=0;j<(int)buf.size();j++)
-	     nrm += buf[j]*buf[j];
-	   std::cout << GridLogMessage << "Norm: " << nrm << std::endl;
-	 }
+	     {
+	       RealD nrm = 0.0;
+	       for (int j=0;j<(int)buf.size();j++)
+		 nrm += buf[j]*buf[j];
+	       std::cout << GridLogMessage << "Norm: " << nrm << std::endl;
+	     }
 #endif
-	 write_floats(f,crc, &buf[0], buf.size() );
+	     write_floats(f,crc, &buf[0], buf.size() );
+	   }
+	 }
+	 
+	 // then write fixed precision basis vectors
+	 for (int nb=0;nb<pr._bgrid._blocks;nb++) {
+	   for (int i=nsingleCap;i<(int)pr._evec.size();i++) {
+	     std::vector<float> buf;
+	     pr._bgrid.peekBlockOfVectorCanonical(nb,pr._evec._v[i],buf);
+	     write_floats_fp16(f,crc, &buf[0], buf.size(), 24);
+	   }
+	 }
+	 
+	 for (int j=0;j<(int)coef.size();j++)
+	   for (int nb=0;nb<pr._bgrid._blocks;nb++) {
+	     // get local coordinate on coarse grid
+	     int ii,oi;
+	     
+	     int l;
+	     std::vector<float> buf;
+	     for (l=0;l<nsingle;l++) {
+	       auto res = ((CoeffCoarse_t*)&coef._v[idx[j]]._odata[oi]._internal._internal[l])[ii];
+	       buf.push_back(res.real());
+	       buf.push_back(res.imag());
+	     }
+	     write_floats(f,crc, &buf[0], buf.size() );
+	     buf.clear();
+	     for (l=nsingle;l<(int)idx.size();l++) {
+	       auto res = ((CoeffCoarse_t*)&coef._v[idx[j]]._odata[oi]._internal._internal[l])[ii];
+	       buf.push_back(res.real());
+	       buf.push_back(res.imag());
+	     }
+	     write_floats_fp16(f,crc, &buf[0], buf.size(), FP16_COEF_EXP_SHARE_FLOATS);
+	   }
+
+	 off = ftello(f);	 
+	 fclose(f);
        }
      }
-
-     // then write fixed precision basis vectors
-     for (int nb=0;nb<pr._bgrid._blocks;nb++) {
-       for (int i=nsingleCap;i<(int)pr._evec.size();i++) {
-	 std::vector<float> buf;
-	 pr._bgrid.peekBlockOfVectorCanonical(nb,pr._evec._v[i],buf);
-	 write_floats_fp16(f,crc, &buf[0], buf.size(), 24);
-       }
-     }
-
-     for (int j=0;j<(int)coef.size();j++)
-       for (int nb=0;nb<pr._bgrid._blocks;nb++) {
-	 // get local coordinate on coarse grid
-	 int ii,oi;
-
-	 int l;
-	 std::vector<float> buf;
-	 for (l=0;l<nsingle;l++) {
-	   auto res = ((CoeffCoarse_t*)&coef._v[j]._odata[oi]._internal._internal[l])[ii];
-	   buf.push_back(res.real());
-	   buf.push_back(res.imag());
-	 }
-	 write_floats(f,crc, &buf[0], buf.size() );
-	 buf.clear();
-	 for (l=nsingle;l<(int)coef.size();l++) {
-	   auto res = ((CoeffCoarse_t*)&coef._v[j]._odata[oi]._internal._internal[l])[ii];
-	   buf.push_back(res.real());
-	   buf.push_back(res.imag());
-	 }
-	 write_floats_fp16(f,crc, &buf[0], buf.size(), FP16_COEF_EXP_SHARE_FLOATS);
-       }
-     
-
+	 
      _grid->Barrier();
      gsw.Stop();
-
-     int64_t off = ftello(f);
+     
      RealD totalGB = (RealD)off / 1024./1024./1024 * _grid->_Nprocessors;
      RealD seconds = gsw.useconds() / 1e6;
      std::cout << GridLogMessage << "Write " << totalGB << " GB of compressed data at " << totalGB/seconds << " GB/s" << std::endl;
-     fclose(f);
-     /*
-       metadata.txt
 
-       crc32[0...numberofslots-1] = 57178492
-       s[0] = 8  # local volume size
-       s[1] = 4
-       s[2] = 4
-       s[3] = 8
-       s[4] = 10   # 4 = s direction
-       b[0] = 2  # block size
-       b[1] = 2
-       b[2] = 2
-       b[3] = 2
-       b[4] = 1
-       nb[0] = 4
-       nb[1] = 2
-       nb[2] = 2
-       nb[3] = 4
-       nb[4] = 10 # number of blocks (consistent with above)
-       neig = 100          # total number of eigenvectors
-       nkeep = 100         # basis size
-       nkeep_single = 100  # nsingle
-       blocks = 640        # number of blocks
-       FP16_COEF_EXP_SHARE_FLOATS = 10 # group n elements for FP16-exponent for coefficients (24 floats for basis vectors)
+     // gather crcs
+     std::vector<uint32_t> crcs(_grid->_Nprocessors);
+     for (int i=0;i<_grid->_Nprocessors;i++) {
+       crcs[i] = 0x0;
+     }
+     crcs[slot] = crc;
+     for (int i=0;i<_grid->_Nprocessors;i++) {
+       _grid->GlobalSum(crcs[i]);
+     }
+     
+     if (_grid->IsBoss()) {
+       sprintf(buf,"%s/metadata.txt",dir);
+       FILE* f = fopen(buf,"wb");
+       assert(f);
+       for (int i=0;i<5;i++)
+	 fprintf(f,"s[%d] = %d\n",i,_grid->FullDimensions()[(i+1)%5] / _grid->_processors[(i+1)%5]);
+       for (int i=0;i<5;i++)
+	 fprintf(f,"b[%d] = %d\n",i,pr._bgrid._bs[(i+1)%5]);
+       for (int i=0;i<5;i++)
+	 fprintf(f,"nb[%d] = %d\n",i,pr._bgrid._nb[(i+1)%5]);
+       fprintf(f,"neig = %d\n",(int)idx.size());
+       fprintf(f,"nkeep = %d\n",(int)pr._evec.size());
+       fprintf(f,"nkeep_single = %d\n",nsingle);
+       fprintf(f,"blocks = %d\n",pr._bgrid._blocks);
+       fprintf(f,"FP16_COEF_EXP_SHARE_FLOATS = %d\n",FP16_COEF_EXP_SHARE_FLOATS);
+       for (int i =0;i<_grid->_Nprocessors;i++)
+	 fprintf(f,"crc32[%d] = %X\n",i,crcs[i]);
+       fclose(f);
+     }
 
-
-      int _t = (int64_t)f_size_block * (args.nkeep - nkeep_fp16);
-      for (nb=0;nb<args.blocks;nb++)
-      write_floats(f,crc,  &block_data_ortho[nb][0], _t );
-      
-      begin_fp16_evec = ftello(f);
-      
-      for (nb=0;nb<args.blocks;nb++)
-      write_floats_fp16(f,crc,  &block_data_ortho[nb][ _t ], (int64_t)f_size_block * nkeep_fp16, 24 );
-      
-int j;
-      for (j=0;j<neig;j++)
-      for (nb=0;nb<args.blocks;nb++) {
-        write_floats(f,crc,  &block_coef[nb][2*args.nkeep*j], 2*(args.nkeep - nkeep_fp16) );
-	  write_floats_fp16(f,crc,  &block_coef[nb][2*args.nkeep*j + 2*(args.nkeep - nkeep_fp16) ], 2*nkeep_fp16 , FP16_COEF_EXP_SHARE_FLOATS);
-	  }
-      
-     */
    }
    
    template<typename Field>

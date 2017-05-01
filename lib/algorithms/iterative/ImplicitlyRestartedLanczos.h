@@ -242,6 +242,41 @@ public:
       }
     }
 
+    void pokeBlockOfVectorCanonical(int cb,Field& v,const std::vector<float>& buf) {
+      std::vector<int> _bsc = { _bs_cb[1], _bs_cb[2], _bs_cb[3], _bs_cb[4], _bs_cb[0] };
+      std::vector<int> ldim = v._grid->LocalDimensions();
+      std::vector<int> cldim = { ldim[1], ldim[2], ldim[3], ldim[4], ldim[0] };
+      const int _nbsc = _bsc[0]*_bsc[1]*_bsc[2]*_bsc[3]*_bsc[4];
+      // take canonical block cb of v and put it in canonical ordering in buf
+      std::vector<int> cx0;
+      getCanonicalBlockOffset(cb,cx0);
+
+#pragma omp parallel
+      {
+	std::vector<int> co0,cl0;
+	co0=cx0; cl0=cx0;
+
+#pragma omp for
+	for (int i=0;i<_nbsc;i++) {
+	  Lexicographic::CoorFromIndex(co0,i,_bsc);
+	  for (int j=0;j<(int)_bsc.size();j++)
+	    cl0[j] = cx0[j] + co0[j];
+	  
+	  std::vector<int> l0 = { cl0[4], cl0[0], cl0[1], cl0[2], cl0[3] };
+	  int oi = v._grid->oIndex(l0);
+	  int ii = v._grid->iIndex(l0);
+	  int lti = i;
+	  
+	  for (int s=0;s<4;s++)
+	    for (int c=0;c<3;c++) {
+	      Coeff_t& ld = ((Coeff_t*)&v._odata[oi]._internal._internal[s]._internal[c])[ii];
+	      int ti = 12*lti + 3*s + c;
+	      ld = Coeff_t(buf[2*ti+0], buf[2*ti+1]);
+	    }
+	}
+      }
+    }
+
     void peekBlockOfVectorCanonical(int cb,const Field& v,std::vector<float>& buf) {
       std::vector<int> _bsc = { _bs_cb[1], _bs_cb[2], _bs_cb[3], _bs_cb[4], _bs_cb[0] };
       std::vector<int> ldim = v._grid->LocalDimensions();
@@ -280,7 +315,43 @@ public:
       }
     }
 
-};
+    int globalToLocalCanonicalBlock(int slot,const std::vector<int>& src_nodes,int nb) {
+      // processor coordinate
+      int _nd = (int)src_nodes.size();
+      std::vector<int> _src_nodes = src_nodes;
+      std::vector<int> pco(_nd);
+      Lexicographic::CoorFromIndex(pco,slot,_src_nodes);
+      std::vector<int> cpco = { pco[1], pco[2], pco[3], pco[4], pco[0] };
+
+      // get local block
+      std::vector<int> _nbc = { _nb[1], _nb[2], _nb[3], _nb[4], _nb[0] };
+      assert(_nd == 5);
+      std::vector<int> c_src_local_blocks(_nd);
+      for (int i=0;i<_nd;i++) {
+	assert(_grid->_fdimensions[i] % (src_nodes[i] * _bs[i]) == 0);
+	c_src_local_blocks[(i+4) % 5] = _grid->_fdimensions[i] / src_nodes[i] / _bs[i];
+      }
+      std::vector<int> cbcoor(_nd);
+      Lexicographic::CoorFromIndex(cbcoor,nb,c_src_local_blocks);
+
+      // cpco, cbcoor
+      std::vector<int> clbcoor(_nd);
+      for (int i=0;i<_nd;i++) {
+	int cgcoor = cpco[i] * c_src_local_blocks[i] + cbcoor[i];
+	int pcoor = cgcoor / _nbc[i];
+	int tpcoor = _grid->_processor_coor[(i+1)%5];
+	if (pcoor != tpcoor)
+	  return -1;
+	clbcoor[i] = cgcoor - tpcoor * _nbc[i]; // canonical local block coordinate for canonical dimension i
+      }
+
+      int lnb;
+      Lexicographic::IndexFromCoor(clbcoor,lnb,_nbc);
+      return lnb;
+    }
+
+
+ };
 
 
 
@@ -547,55 +618,87 @@ public:
      return regu_coor * ls * 48 + pos[0] * 48 + co * 4 + simd_coor * 2;
    }
    
-   template<typename Field>
-     static bool read_argonne(BasisFieldVector<Field>& ret,const char* dir, const std::vector<int>& cnodes) {
+   void get_read_geometry(const GridBase* _grid,const std::vector<int>& cnodes,
+			  std::map<int, std::vector<int> >& slots, 
+			  std::vector<int>& slot_lvol,
+			  std::vector<int>& lvol,
+			  int64_t& slot_lsites,int& ntotal) {
 
-     GridBase* _grid = ret._v[0]._grid;
-
-     // this is slow code to read the argonne file format for debugging purposes
+     int _nd = (int)cnodes.size();
      std::vector<int> nodes = cnodes;
-     std::vector<int> slot_lvol, lvol;
-     int _nd = (int)nodes.size();
-     int i, ntotal = 1;
+
+     slots.clear();
+     slot_lvol.clear();
+     lvol.clear();
+
+     int i;
+     ntotal = 1;
      int64_t lsites = 1;
-     int64_t slot_lsites = 1;
+     slot_lsites = 1;
      for (i=0;i<_nd;i++) {
-       slot_lvol.push_back(_grid->FullDimensions()[i] / nodes[i]);
-       lvol.push_back(_grid->FullDimensions()[i] / _grid->_processors[i]);
+       assert(_grid->_fdimensions[i] % nodes[i] == 0);
+       slot_lvol.push_back(_grid->_fdimensions[i] / nodes[i]);
+       lvol.push_back(_grid->_fdimensions[i] / _grid->_processors[i]);
        lsites *= lvol.back();
        slot_lsites *= slot_lvol.back();
        ntotal *= nodes[i];
      }
 
+     std::vector<int> lcoor, gcoor, scoor;
+     lcoor.resize(_nd); gcoor.resize(_nd);  scoor.resize(_nd);
+     
+     // create mapping of indices to slots
+     for (int lidx = 0; lidx < lsites; lidx++) {
+       Lexicographic::CoorFromIndex(lcoor,lidx,lvol);
+       for (int i=0;i<_nd;i++) {
+	 gcoor[i] = lcoor[i] + _grid->_processor_coor[i]*lvol[i];
+	 scoor[i] = gcoor[i] / slot_lvol[i];
+       }
+       int slot;
+       Lexicographic::IndexFromCoor(scoor,slot,nodes);
+       auto sl = slots.find(slot);
+       if (sl == slots.end())
+	 slots[slot] = std::vector<int>();
+       slots[slot].push_back(lidx);
+     }
+   }
+   
+   static void canonical_block_to_coarse_coordinates(GridBase* _coarsegrid,int nb,int& ii,int& oi) {
+      // canonical nb needs to be mapped in a coordinate on my coarsegrid (ii,io)
+      std::vector<int> _l = _coarsegrid->LocalDimensions();
+      std::vector<int> _cl = { _l[1], _l[2], _l[3], _l[4], _l[0] };
+      std::vector<int> _cc(_l.size());
+      Lexicographic::CoorFromIndex(_cc,nb,_cl);
+      std::vector<int> _c = { _cc[4], _cc[0], _cc[1], _cc[2], _cc[3] };
+      ii = _coarsegrid->iIndex(_c);
+      oi = _coarsegrid->oIndex(_c);
+    }
+
+    template<typename Field>
+     static bool read_argonne(BasisFieldVector<Field>& ret,const char* dir, const std::vector<int>& cnodes) {
+
+     GridBase* _grid = ret._v[0]._grid;
+
+     std::map<int, std::vector<int> > slots;
+     std::vector<int> slot_lvol, lvol;
+     int64_t slot_lsites;
+     int ntotal;
+     get_read_geometry(_grid,cnodes,
+		       slots,slot_lvol,lvol,slot_lsites,
+		       ntotal);
+     int _nd = (int)lvol.size();
+
+     // this is slow code to read the argonne file format for debugging purposes
      int nperdir = ntotal / 32;
      if (nperdir < 1)
        nperdir=1;
-     std::cout << GridLogMessage << " Read " << dir << " nodes = " << nodes << std::endl;
+     std::cout << GridLogMessage << " Read " << dir << " nodes = " << cnodes << std::endl;
      std::cout << GridLogMessage << " lvol = " << lvol << std::endl;
      
-     std::map<int, std::vector<int> > slots;
-     
-     
-     {
-       std::vector<int> lcoor, gcoor, scoor;
-       lcoor.resize(_nd); gcoor.resize(_nd);  scoor.resize(_nd);
-       
-       // first create mapping of indices to slots
-       for (int lidx = 0; lidx < lsites; lidx++) {
-	 Lexicographic::CoorFromIndex(lcoor,lidx,lvol);
-	 for (int i=0;i<_nd;i++) {
-	   gcoor[i] = lcoor[i] + _grid->_processor_coor[i]*lvol[i];
-	   scoor[i] = gcoor[i] / slot_lvol[i];
-	 }
-	 int slot;
-	 Lexicographic::IndexFromCoor(scoor,slot,nodes);
-	 auto sl = slots.find(slot);
-	 if (sl == slots.end())
-	   slots[slot] = std::vector<int>();
-	 slots[slot].push_back(lidx);
-       }
-     }
-     
+     // for error messages
+     char hostname[1024];
+     gethostname(hostname, 1024);
+
      // now load one slot at a time and fill the vector
      for (auto sl=slots.begin();sl!=slots.end();sl++) {
        std::vector<int>& idx = sl->second;
@@ -606,8 +709,10 @@ public:
        
        sprintf(buf,"%s/checksums.txt",dir);
        FILE* f = fopen(buf,"rt");
-       if (!f)
+       if (!f) {
+	 fprintf(stderr,"Node %s cannot read %s\n",hostname,buf); fflush(stderr);
 	 return false;
+       }
        
        for (int l=0;l<3+slot;l++)
 	 fgets(buf,sizeof(buf),f);
@@ -617,8 +722,10 @@ public:
        // load one slot vector
        sprintf(buf,"%s/%2.2d/%10.10d",dir,slot/nperdir,slot);
        f = fopen(buf,"rb");
-       if (!f)
+       if (!f) {
+	 fprintf(stderr,"Node %s cannot read %s\n",hostname,buf); fflush(stderr);
 	 return false;
+       }
        
        fseeko(f,0,SEEK_END);
        off_t total_size = ftello(f);
@@ -699,11 +806,33 @@ public:
        
        assert(crc == crc_exp);
      }
-     
+
      _grid->Barrier();
      std::cout << GridLogMessage  << "Loading complete" << std::endl;
      
      return true;
+   }
+
+   template<typename Field>
+     static bool read_argonne(BasisFieldVector<Field>& ret,const char* dir) {
+
+     char buf[4096];
+     sprintf(buf,"%s/nodes.txt",dir);
+     FILE* f = fopen(buf,"rt");
+     if (!f) {
+       fprintf(stderr,"Attempting to load eigenvectors without secifying node layout failed due to absence of nodes.txt\n");
+       fflush(stderr);
+       return false;
+     }
+
+     GridBase* _grid = ret._v[0]._grid;
+
+     std::vector<int> nodes((int)_grid->_processors.size());
+     for (int i =0;i<(int)_grid->_processors.size();i++)
+       assert(fscanf(f,"%d\n",&nodes[i])==1);
+     fclose(f);
+
+     return read_argonne(ret,dir,nodes);
    }
 
    static void write_bytes(void* buf, int64_t s, FILE* f, uint32_t& crc) {
@@ -732,6 +861,14 @@ public:
 
    static void write_floats(FILE* f, uint32_t& crc, float* buf, int64_t n) {
      write_bytes(buf,n*sizeof(float),f,crc);
+   }
+
+   void read_floats(char* & ptr, float* out, int64_t n) {
+     float* in = (float*)ptr;
+     ptr += 4*n;
+
+     for (int64_t i=0;i<n;i++)
+       out[i] = in[i];
    }
 
    static int fp_map(float in, float min, float max, int N) {
@@ -861,8 +998,220 @@ public:
    }
 
    template<typename Field,typename CoarseField>
-     static bool read_compressed_vectors(const char* dir,const BlockProjector<Field>& pr,const BasisFieldVector<CoarseField>& coef) {
-     return false;
+     static bool read_compressed_vectors(const char* dir,BlockProjector<Field>& pr,BasisFieldVector<CoarseField>& coef) {
+
+     const BasisFieldVector<Field>& basis = pr._evec;
+     GridBase* _grid = basis._v[0]._grid;
+
+     // for error messages
+     char hostname[1024];
+     gethostname(hostname, 1024);
+
+     // first read metadata
+     char buf[4096];
+     sprintf(buf,"%s/metadata.txt",dir);
+
+     std::vector<uint32_t> s,b,nb,nn,crc32;
+     s.resize(5); b.resize(5); nb.resize(5); nn.resize(5);
+     uint32_t neig, nkeep, nkeep_single, blocks, _FP16_COEF_EXP_SHARE_FLOATS;
+     uint32_t nprocessors = 1;
+
+     FILE* f = 0;
+     uint32_t status = 0;
+     if (_grid->IsBoss()) {
+       f = fopen(buf,"rb");
+       status=f ? 1 : 0;
+     }
+     _grid->GlobalSum(status);
+     if (!status) {
+       return false;
+     }
+
+#define _IRL_READ_INT(buf,p) if (f) { assert(fscanf(f,buf,p)==1); } else { *(p) = 0; } _grid->GlobalSum(*(p));
+
+     for (int i=0;i<5;i++) {
+       sprintf(buf,"s[%d] = %%d\n",i);
+       _IRL_READ_INT(buf,&s[(i+1)%5]);
+     }
+     for (int i=0;i<5;i++) {
+       sprintf(buf,"b[%d] = %%d\n",i);
+       _IRL_READ_INT(buf,&b[(i+1)%5]);
+     }
+     for (int i=0;i<5;i++) {
+       sprintf(buf,"nb[%d] = %%d\n",i);
+       _IRL_READ_INT(buf,&nb[(i+1)%5]);
+     }
+     _IRL_READ_INT("neig = %d\n",&neig);
+     _IRL_READ_INT("nkeep = %d\n",&nkeep);
+     _IRL_READ_INT("nkeep_single = %d\n",&nkeep_single);
+     _IRL_READ_INT("blocks = %d\n",&blocks);
+     _IRL_READ_INT("FP16_COEF_EXP_SHARE_FLOATS = %d\n",&_FP16_COEF_EXP_SHARE_FLOATS);
+
+     for (int i=0;i<5;i++) {
+       assert(_grid->FullDimensions()[i] % s[i] == 0);
+       nn[i] = _grid->FullDimensions()[i] / s[i];
+       nprocessors *= nn[i];
+     }
+
+     std::cout << GridLogMessage << "Reading data that was generated on node-layout " << nn << std::endl;
+
+     crc32.resize(nprocessors);
+     for (int i =0;i<nprocessors;i++) {
+       sprintf(buf,"crc32[%d] = %%X\n",i);
+       _IRL_READ_INT(buf,&crc32[i]);
+     }
+
+#undef _IRL_READ_INT
+
+     if (f)
+       fclose(f);
+
+     // allocate memory
+     assert(std::equal(pr._bgrid._bs.begin(),pr._bgrid._bs.end(),b.begin())); // needs to be the same for now
+     assert(pr._evec.size() == nkeep); // needs to be the same since this is compile-time fixed
+     coef.resize(neig);
+
+     // now get read geometry
+     std::map<int, std::vector<int> > slots;
+     std::vector<int> slot_lvol, lvol;
+     int64_t slot_lsites;
+     int ntotal;
+     std::vector<int> _nn(nn.begin(),nn.end());
+     get_read_geometry(_grid,_nn,
+		       slots,slot_lvol,lvol,slot_lsites,
+		       ntotal);
+     int _nd = (int)lvol.size();
+
+     // types
+     typedef typename Field::scalar_type Coeff_t;
+     typedef typename CoarseField::scalar_type CoeffCoarse_t;
+
+     // slot layout
+     int nperdir = ntotal / 32;
+     if (nperdir < 1)
+       nperdir=1;
+   
+     // load all necessary slots and store them appropriately
+     for (auto sl=slots.begin();sl!=slots.end();sl++) {
+       std::vector<int>& idx = sl->second;
+       int slot = sl->first;
+       std::vector<float> rdata;
+       
+       char buf[4096];
+       
+       // load one slot vector
+       sprintf(buf,"%s/%2.2d/%10.10d.compressed",dir,slot/nperdir,slot);
+       f = fopen(buf,"rb");
+       if (!f) {
+	 fprintf(stderr,"Node %s cannot read %s\n",hostname,buf); fflush(stderr);
+	 return false;
+       }
+
+       uint32_t crc = 0x0;
+       off_t size;
+
+       GridStopWatch gsw;
+       _grid->Barrier();
+       gsw.Start();
+
+       fseeko(f,0,SEEK_END);
+       size = ftello(f);
+       fseeko(f,0,SEEK_SET);
+
+       std::vector<char> raw_in(size);
+       assert(fread(&raw_in[0],size,1,f) == 1);
+
+       _grid->Barrier();
+       gsw.Stop();
+
+       RealD totalGB = (RealD)size / 1024./1024./1024 * _grid->_Nprocessors;
+       RealD seconds = gsw.useconds() / 1e6;
+       std::cout << GridLogMessage << "Read " << totalGB << " GB of compressed data at " << totalGB/seconds << " GB/s" << std::endl;
+
+       uint32_t crc_comp = crc32_threaded((unsigned char*)&raw_in[0],size,0);
+
+       if (crc_comp != crc32[slot]) {
+	 fprintf(stderr,"Node %s found crc mismatch for file %s\n",hostname,buf); fflush(stderr);
+       }
+
+       _grid->Barrier();
+       
+       assert(crc_comp == crc32[slot]);
+    
+       fclose(f);
+
+       char* ptr = &raw_in[0];
+
+       {
+	 int nsingleCap = nkeep_single;
+	 if (pr._evec.size() < nsingleCap)
+	   nsingleCap = pr._evec.size();
+
+	 int _cf_block_size = slot_lsites * 12 / 2 / blocks;
+	 
+	 // first read single precision basis vectors
+	 {
+	   std::vector<float> buf(_cf_block_size * 2);
+	   for (int nb=0;nb<blocks;nb++) {
+	     for (int i=0;i<nsingleCap;i++) {
+	       read_floats(ptr, &buf[0], buf.size() );
+	       int mnb = pr._bgrid.globalToLocalCanonicalBlock(slot,_nn,nb);
+	       if (mnb != -1)
+		 pr._bgrid.pokeBlockOfVectorCanonical(mnb,pr._evec._v[i],buf);
+	     }
+	   }
+	 }
+	 
+	 // then read fixed precision basis vectors
+	 {
+	   std::vector<float> buf(_cf_block_size * 2);
+	   for (int nb=0;nb<blocks;nb++) {
+	     for (int i=nsingleCap;i<(int)pr._evec.size();i++) {
+	       read_floats_fp16(ptr, &buf[0], buf.size(), 24);
+	       int mnb = pr._bgrid.globalToLocalCanonicalBlock(slot,_nn,nb);
+	       if (mnb != -1)
+		 pr._bgrid.pokeBlockOfVectorCanonical(mnb,pr._evec._v[i],buf);
+	     }
+	   }
+	 }
+	 
+	 {
+	   std::vector<float> buf1(nkeep_single*2);
+	   std::vector<float> buf2(((int)coef.size() - nkeep_single)*2);
+
+	   for (int j=0;j<(int)coef.size();j++)
+	     for (int nb=0;nb<blocks;nb++) {
+	       // get local coordinate on coarse grid
+	       int ii,oi;
+	       int mnb = pr._bgrid.globalToLocalCanonicalBlock(slot,_nn,nb);
+	       if (mnb != -1)
+		 canonical_block_to_coarse_coordinates(coef._v[0]._grid,mnb,ii,oi);
+
+	       int l;
+	       read_floats(ptr, &buf1[0], buf1.size() );
+	       if (mnb != -1) {
+		 for (l=0;l<nkeep_single;l++) {
+		   auto res = ((CoeffCoarse_t*)&coef._v[idx[j]]._odata[oi]._internal._internal[l])[ii];
+		   res = CoeffCoarse_t(buf1[2*l+0],buf1[2*l+1]);
+		 }
+	       }
+	       read_floats_fp16(ptr, &buf2[0], buf2.size(), _FP16_COEF_EXP_SHARE_FLOATS);
+	       if (mnb != -1) {
+		 for (l=nkeep_single;l<neig;l++) {
+		   auto res = ((CoeffCoarse_t*)&coef._v[idx[j]]._odata[oi]._internal._internal[l])[ii];
+		   res = CoeffCoarse_t(buf2[2*l+0],buf2[2*l+1]);
+		 }
+	       }
+
+	     }
+	 }
+
+       }
+
+     }
+
+     return true;
+
    }
 
    static bool DirectoryExists(const char *path) {
@@ -935,7 +1284,7 @@ public:
        _grid->Barrier();
        if (_grid->ThisRank() % groups == group) {
 	 
-	 sprintf(buf,"%s/%2.2d/%10.10d",dir,slot/nperdir,slot);
+	 sprintf(buf,"%s/%2.2d/%10.10d.compressed",dir,slot/nperdir,slot);
 	 FILE* f = fopen(buf,"wb");
 	 assert(f);
 	 	 
@@ -970,27 +1319,38 @@ public:
 	   }
 	 }
 	 
-	 for (int j=0;j<(int)coef.size();j++)
+	 assert(coef._v[0]._grid->_isites*coef._v[0]._grid->_osites == pr._bgrid._blocks);
+
+	 for (int j=0;j<(int)coef.size();j++) {
+	   
+	   //RealD nrmTest = 0.0;
 	   for (int nb=0;nb<pr._bgrid._blocks;nb++) {
 	     // get local coordinate on coarse grid
-	     int ii,oi;
+	     int ii, oi;
+	     canonical_block_to_coarse_coordinates(coef._v[0]._grid,nb,ii,oi);
 	     
 	     int l;
 	     std::vector<float> buf;
-	     for (l=0;l<nsingle;l++) {
+	     for (l=0;l<nsingleCap;l++) {
 	       auto res = ((CoeffCoarse_t*)&coef._v[idx[j]]._odata[oi]._internal._internal[l])[ii];
 	       buf.push_back(res.real());
 	       buf.push_back(res.imag());
+	       //nrmTest += res.real() * res.real() + res.imag() * res.imag();
 	     }
 	     write_floats(f,crc, &buf[0], buf.size() );
 	     buf.clear();
-	     for (l=nsingle;l<(int)idx.size();l++) {
+	     for (l=nsingleCap;l<(int)pr._evec.size();l++) {
 	       auto res = ((CoeffCoarse_t*)&coef._v[idx[j]]._odata[oi]._internal._internal[l])[ii];
 	       buf.push_back(res.real());
 	       buf.push_back(res.imag());
+	       //nrmTest += res.real() * res.real() + res.imag() * res.imag();
 	     }
 	     write_floats_fp16(f,crc, &buf[0], buf.size(), FP16_COEF_EXP_SHARE_FLOATS);
 	   }
+
+	   //_grid->GlobalSum(nrmTest);
+	   //std::cout << GridLogMessage << "Test norm: " << nrmTest << std::endl;
+	 }
 
 	 off = ftello(f);	 
 	 fclose(f);

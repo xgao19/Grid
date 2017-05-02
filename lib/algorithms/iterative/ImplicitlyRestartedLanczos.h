@@ -331,14 +331,14 @@ public:
 	assert(_grid->_fdimensions[i] % (src_nodes[i] * _bs[i]) == 0);
 	c_src_local_blocks[(i+4) % 5] = _grid->_fdimensions[i] / src_nodes[i] / _bs[i];
       }
-      std::vector<int> cbcoor(_nd);
+      std::vector<int> cbcoor(_nd); // coordinate of block in slot in canonical form
       Lexicographic::CoorFromIndex(cbcoor,nb,c_src_local_blocks);
 
       // cpco, cbcoor
       std::vector<int> clbcoor(_nd);
       for (int i=0;i<_nd;i++) {
-	int cgcoor = cpco[i] * c_src_local_blocks[i] + cbcoor[i];
-	int pcoor = cgcoor / _nbc[i];
+	int cgcoor = cpco[i] * c_src_local_blocks[i] + cbcoor[i]; // global block coordinate
+	int pcoor = cgcoor / _nbc[i]; // processor coordinate in my Grid
 	int tpcoor = _grid->_processor_coor[(i+1)%5];
 	if (pcoor != tpcoor)
 	  return -1;
@@ -347,6 +347,7 @@ public:
 
       int lnb;
       Lexicographic::IndexFromCoor(clbcoor,lnb,_nbc);
+      //std::cout << "Mapped slot = " << slot << " nb = " << nb << " to " << lnb << std::endl;
       return lnb;
     }
 
@@ -516,7 +517,7 @@ public:
   }
 
   template<typename CoarseField>
-    void deflate(BasisFieldVector<CoarseField>& _coef,const std::vector<RealD>& eval,const std::vector<int>& idx,int N,const Field& src_orig,Field& result) {
+    void deflateFine(BasisFieldVector<CoarseField>& _coef,const std::vector<RealD>& eval,const std::vector<int>& idx,int N,const Field& src_orig,Field& result) {
     result = zero;
     for (int i=0;i<N;i++) {
       int j = idx[i];
@@ -524,6 +525,25 @@ public:
       coarseToFine(_coef._v[j],tmp);
       axpy(result,TensorRemove(innerProduct(tmp,src_orig)) / eval[j],tmp,result);
     }
+  }
+
+  template<typename CoarseField>
+    void deflateCoarse(BasisFieldVector<CoarseField>& _coef,const std::vector<RealD>& eval,const std::vector<int>& idx,int N,const Field& src_orig,Field& result) {
+    CoarseField src_coarse(_coef._v[0]._grid);
+    CoarseField result_coarse = src_coarse;
+    result_coarse = zero;
+    fineToCoarse(src_orig,src_coarse);
+    for (int i=0;i<N;i++) {
+      int j = idx[i];
+      axpy(result_coarse,TensorRemove(innerProduct(_coef._v[j],src_coarse)) / eval[j],_coef._v[j],result_coarse);
+    }
+    coarseToFine(result_coarse,result);
+  }
+
+  template<typename CoarseField>
+    void deflate(BasisFieldVector<CoarseField>& _coef,const std::vector<RealD>& eval,const std::vector<int>& idx,int N,const Field& src_orig,Field& result) {
+    // Deflation on coarse Grid is much faster, so use it by default.  Deflation on fine Grid is kept for legacy reasons for now.
+    deflateCoarse(_coef,eval,idx,N,src_orig,result);
   }
 
 };
@@ -1150,35 +1170,53 @@ public:
 	 int _cf_block_size = slot_lsites * 12 / 2 / blocks;
 	 
 	 // first read single precision basis vectors
+#pragma omp parallel
 	 {
 	   std::vector<float> buf(_cf_block_size * 2);
+#pragma omp for
 	   for (int nb=0;nb<blocks;nb++) {
 	     for (int i=0;i<nsingleCap;i++) {
-	       read_floats(ptr, &buf[0], buf.size() );
+               char* lptr = ptr + buf.size()*(i + nsingleCap*nb)*4;
+	       read_floats(lptr, &buf[0], buf.size() );
 	       int mnb = pr._bgrid.globalToLocalCanonicalBlock(slot,_nn,nb);
 	       if (mnb != -1)
 		 pr._bgrid.pokeBlockOfVectorCanonical(mnb,pr._evec._v[i],buf);
 	     }
+	   }
+
+#pragma omp single
+	   {
+	     ptr = ptr + buf.size()*nsingleCap*blocks*4;
 	   }
 	 }
 	 
 	 // then read fixed precision basis vectors
+#pragma omp parallel
 	 {
 	   std::vector<float> buf(_cf_block_size * 2);
+#pragma omp for
 	   for (int nb=0;nb<blocks;nb++) {
 	     for (int i=nsingleCap;i<(int)pr._evec.size();i++) {
-	       read_floats_fp16(ptr, &buf[0], buf.size(), 24);
+	       char* lptr = ptr + buf.size()*(i + (pr._evec.size() - nsingleCap)*nb)*4;
+	       read_floats_fp16(lptr, &buf[0], buf.size(), 24);
 	       int mnb = pr._bgrid.globalToLocalCanonicalBlock(slot,_nn,nb);
 	       if (mnb != -1)
 		 pr._bgrid.pokeBlockOfVectorCanonical(mnb,pr._evec._v[i],buf);
 	     }
 	   }
+
+#pragma omp single
+	   {
+	     ptr = ptr + buf.size()*(pr._evec.size() - nsingleCap)*blocks*4;
+	   }
 	 }
 	 
+#pragma omp parallel
 	 {
 	   std::vector<float> buf1(nkeep_single*2);
-	   std::vector<float> buf2(((int)coef.size() - nkeep_single)*2);
+	   std::vector<float> buf2((nkeep - nkeep_single)*2);
 
+#pragma omp for
 	   for (int j=0;j<(int)coef.size();j++)
 	     for (int nb=0;nb<blocks;nb++) {
 	       // get local coordinate on coarse grid
@@ -1187,19 +1225,18 @@ public:
 	       if (mnb != -1)
 		 canonical_block_to_coarse_coordinates(coef._v[0]._grid,mnb,ii,oi);
 
+	       char* lptr = ptr + (buf1.size() + buf2.size())*(nb + j*blocks)*4;
 	       int l;
-	       read_floats(ptr, &buf1[0], buf1.size() );
+	       read_floats(lptr, &buf1[0], buf1.size() );
 	       if (mnb != -1) {
 		 for (l=0;l<nkeep_single;l++) {
-		   auto res = ((CoeffCoarse_t*)&coef._v[idx[j]]._odata[oi]._internal._internal[l])[ii];
-		   res = CoeffCoarse_t(buf1[2*l+0],buf1[2*l+1]);
+		   ((CoeffCoarse_t*)&coef._v[j]._odata[oi]._internal._internal[l])[ii] = CoeffCoarse_t(buf1[2*l+0],buf1[2*l+1]);
 		 }
 	       }
-	       read_floats_fp16(ptr, &buf2[0], buf2.size(), _FP16_COEF_EXP_SHARE_FLOATS);
+	       read_floats_fp16(lptr, &buf2[0], buf2.size(), _FP16_COEF_EXP_SHARE_FLOATS);
 	       if (mnb != -1) {
-		 for (l=nkeep_single;l<neig;l++) {
-		   auto res = ((CoeffCoarse_t*)&coef._v[idx[j]]._odata[oi]._internal._internal[l])[ii];
-		   res = CoeffCoarse_t(buf2[2*l+0],buf2[2*l+1]);
+		 for (l=nkeep_single;l<nkeep;l++) {
+		   ((CoeffCoarse_t*)&coef._v[j]._odata[oi]._internal._internal[l])[ii] = CoeffCoarse_t(buf2[2*(l-nkeep_single)+0],buf2[2*(l-nkeep_single)+1]);
 		 }
 	       }
 

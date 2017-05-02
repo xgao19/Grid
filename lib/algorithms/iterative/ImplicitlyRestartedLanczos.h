@@ -1162,12 +1162,16 @@ public:
 
        char* ptr = &raw_in[0];
 
+       GridStopWatch gsw2;
+       gsw2.Start();
        {
 	 int nsingleCap = nkeep_single;
 	 if (pr._evec.size() < nsingleCap)
 	   nsingleCap = pr._evec.size();
 
 	 int _cf_block_size = slot_lsites * 12 / 2 / blocks;
+
+#define FP_16_SIZE(a,b)  (( (a) + (a/b) )*2)
 	 
 	 // first read single precision basis vectors
 #pragma omp parallel
@@ -1184,10 +1188,12 @@ public:
 	     }
 	   }
 
+#pragma omp barrier
 #pragma omp single
 	   {
 	     ptr = ptr + buf.size()*nsingleCap*blocks*4;
 	   }
+
 	 }
 	 
 	 // then read fixed precision basis vectors
@@ -1197,7 +1203,7 @@ public:
 #pragma omp for
 	   for (int nb=0;nb<blocks;nb++) {
 	     for (int i=nsingleCap;i<(int)pr._evec.size();i++) {
-	       char* lptr = ptr + buf.size()*(i + (pr._evec.size() - nsingleCap)*nb)*4;
+	   char* lptr = ptr + FP_16_SIZE( buf.size(), 24 )*((i-nsingleCap) + (pr._evec.size() - nsingleCap)*nb);
 	       read_floats_fp16(lptr, &buf[0], buf.size(), 24);
 	       int mnb = pr._bgrid.globalToLocalCanonicalBlock(slot,_nn,nb);
 	       if (mnb != -1)
@@ -1205,9 +1211,10 @@ public:
 	     }
 	   }
 
+#pragma omp barrier
 #pragma omp single
 	   {
-	     ptr = ptr + buf.size()*(pr._evec.size() - nsingleCap)*blocks*4;
+	     ptr = ptr + FP_16_SIZE( buf.size()*(pr._evec.size() - nsingleCap)*blocks, 24 );
 	   }
 	 }
 	 
@@ -1225,7 +1232,7 @@ public:
 	       if (mnb != -1)
 		 canonical_block_to_coarse_coordinates(coef._v[0]._grid,mnb,ii,oi);
 
-	       char* lptr = ptr + (buf1.size() + buf2.size())*(nb + j*blocks)*4;
+	       char* lptr = ptr + (4*buf1.size() + FP_16_SIZE(buf2.size(), _FP16_COEF_EXP_SHARE_FLOATS))*(nb + j*blocks);
 	       int l;
 	       read_floats(lptr, &buf1[0], buf1.size() );
 	       if (mnb != -1) {
@@ -1241,12 +1248,15 @@ public:
 	       }
 
 	     }
-	 }
-
+          }
+	 
        }
 
+       gsw2.Stop();
+       seconds=gsw2.useconds()/1e6;
+       std::cout << GridLogMessage << "Processed " << totalGB << " GB of compressed data at " << totalGB/seconds << " GB/s" << std::endl;
      }
-
+#undef FP_16_SIZE
      return true;
 
    }

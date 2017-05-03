@@ -431,12 +431,59 @@ class BasisFieldVector {
 
     // sort indexes based on comparing values in v
     sort(idx.begin(), idx.end(),
-	 [&sort_vals](int i1, int i2) {return sort_vals[i1] < sort_vals[i2];});
+	 [&sort_vals](int i1, int i2) {return ::fabs(sort_vals[i1]) < ::fabs(sort_vals[i2]);});
 
     return idx;
   }
 
- };
+  void reorderInPlace(DenseVector<RealD>& sort_vals, std::vector<int>& idx) {
+    GridStopWatch gsw;
+    gsw.Start();
+
+    int nswaps = 0;
+    for (size_t i=0;i<idx.size();i++) {
+      if (idx[i] != i) {
+
+	// find proper place (this could be done in logarithmic time, don't bother for now)
+	size_t j;
+	for (j=i;j<idx.size();j++)
+	  if (idx[j]==i)
+	    break;
+	assert(j!=idx.size());
+	
+	Field _t(_v[0]._grid);
+	_t = _v[idx[j]];
+	_v[idx[j]] = _v[idx[i]];
+	_v[idx[i]] = _t;
+
+	RealD _td = sort_vals[idx[j]];
+	sort_vals[idx[j]] = sort_vals[idx[i]];
+	sort_vals[idx[i]] = _td;
+
+	int _tt = idx[i];
+	idx[i] = idx[j];
+	idx[j] = _tt;
+	
+	nswaps++;
+      }
+    }
+
+    // sort values
+    gsw.Stop();
+    std::cout << GridLogMessage << "Sorted eigenspace in place in " << gsw.Elapsed() << " using " << nswaps << " swaps" << std::endl;
+  }
+
+  void sortInPlace(DenseVector<RealD>& sort_vals, bool reverse) {
+
+    std::vector<int> idx = getIndex(sort_vals);
+    if (reverse)
+      std::reverse(idx.begin(), idx.end());
+
+    reorderInPlace(sort_vals,idx);
+
+  }
+
+ }; 
 
  template<typename Field>
 class BlockProjector {
@@ -517,33 +564,31 @@ public:
   }
 
   template<typename CoarseField>
-    void deflateFine(BasisFieldVector<CoarseField>& _coef,const std::vector<RealD>& eval,const std::vector<int>& idx,int N,const Field& src_orig,Field& result) {
+    void deflateFine(BasisFieldVector<CoarseField>& _coef,const std::vector<RealD>& eval,int N,const Field& src_orig,Field& result) {
     result = zero;
     for (int i=0;i<N;i++) {
-      int j = idx[i];
       Field tmp(result._grid);
-      coarseToFine(_coef._v[j],tmp);
-      axpy(result,TensorRemove(innerProduct(tmp,src_orig)) / eval[j],tmp,result);
+      coarseToFine(_coef._v[i],tmp);
+      axpy(result,TensorRemove(innerProduct(tmp,src_orig)) / eval[i],tmp,result);
     }
   }
 
   template<typename CoarseField>
-    void deflateCoarse(BasisFieldVector<CoarseField>& _coef,const std::vector<RealD>& eval,const std::vector<int>& idx,int N,const Field& src_orig,Field& result) {
+    void deflateCoarse(BasisFieldVector<CoarseField>& _coef,const std::vector<RealD>& eval,int N,const Field& src_orig,Field& result) {
     CoarseField src_coarse(_coef._v[0]._grid);
     CoarseField result_coarse = src_coarse;
     result_coarse = zero;
     fineToCoarse(src_orig,src_coarse);
     for (int i=0;i<N;i++) {
-      int j = idx[i];
-      axpy(result_coarse,TensorRemove(innerProduct(_coef._v[j],src_coarse)) / eval[j],_coef._v[j],result_coarse);
+      axpy(result_coarse,TensorRemove(innerProduct(_coef._v[i],src_coarse)) / eval[i],_coef._v[i],result_coarse);
     }
     coarseToFine(result_coarse,result);
   }
 
   template<typename CoarseField>
-    void deflate(BasisFieldVector<CoarseField>& _coef,const std::vector<RealD>& eval,const std::vector<int>& idx,int N,const Field& src_orig,Field& result) {
+    void deflate(BasisFieldVector<CoarseField>& _coef,const std::vector<RealD>& eval,int N,const Field& src_orig,Field& result) {
     // Deflation on coarse Grid is much faster, so use it by default.  Deflation on fine Grid is kept for legacy reasons for now.
-    deflateCoarse(_coef,eval,idx,N,src_orig,result);
+    deflateCoarse(_coef,eval,N,src_orig,result);
   }
 
 };
@@ -836,16 +881,20 @@ public:
    template<typename Field>
      static bool read_argonne(BasisFieldVector<Field>& ret,const char* dir) {
 
+
+     GridBase* _grid = ret._v[0]._grid;
+
      char buf[4096];
      sprintf(buf,"%s/nodes.txt",dir);
      FILE* f = fopen(buf,"rt");
      if (!f) {
-       fprintf(stderr,"Attempting to load eigenvectors without secifying node layout failed due to absence of nodes.txt\n");
-       fflush(stderr);
+       if (_grid->IsBoss()) {
+	 fprintf(stderr,"Attempting to load eigenvectors without secifying node layout failed due to absence of nodes.txt\n");
+	 fflush(stderr);
+       }
        return false;
      }
 
-     GridBase* _grid = ret._v[0]._grid;
 
      std::vector<int> nodes((int)_grid->_processors.size());
      for (int i =0;i<(int)_grid->_processors.size();i++)
@@ -1195,6 +1244,9 @@ public:
 	   }
 
 	 }
+
+	 // TODO: at this point I should add a checksum test for block_sp(nb,v,v) for all blocks, then I would know that the mapping
+	 // to blocks is OK at this point; after that ...
 	 
 	 // then read fixed precision basis vectors
 #pragma omp parallel
@@ -1203,7 +1255,7 @@ public:
 #pragma omp for
 	   for (int nb=0;nb<blocks;nb++) {
 	     for (int i=nsingleCap;i<(int)pr._evec.size();i++) {
-	   char* lptr = ptr + FP_16_SIZE( buf.size(), 24 )*((i-nsingleCap) + (pr._evec.size() - nsingleCap)*nb);
+	       char* lptr = ptr + FP_16_SIZE( buf.size(), 24 )*((i-nsingleCap) + (pr._evec.size() - nsingleCap)*nb);
 	       read_floats_fp16(lptr, &buf[0], buf.size(), 24);
 	       int mnb = pr._bgrid.globalToLocalCanonicalBlock(slot,_nn,nb);
 	       if (mnb != -1)
@@ -1273,7 +1325,7 @@ public:
 
    template<typename Field,typename CoarseField>
    static void write_compressed_vectors(const char* dir,const BlockProjector<Field>& pr,const BasisFieldVector<CoarseField>& coef,
-					const std::vector<int>& idx, int nsingle,int writer_nodes = 0) {
+					int nsingle,int writer_nodes = 0) {
 
      GridStopWatch gsw;
      
@@ -1334,11 +1386,17 @@ public:
 	 sprintf(buf,"%s/%2.2d/%10.10d.compressed",dir,slot/nperdir,slot);
 	 FILE* f = fopen(buf,"wb");
 	 assert(f);
+
+	 //buffer does not seem to help
+	 //setvbuf ( f , NULL , _IOFBF , 1024*1024*512 );
 	 	 
 	 int nsingleCap = nsingle;
 	 if (pr._evec.size() < nsingleCap)
 	   nsingleCap = pr._evec.size();
 	 
+	 GridStopWatch gsw1,gsw2,gsw3,gsw4;
+
+	 gsw1.Start();
 	 // first write single precision basis vectors
 	 for (int nb=0;nb<pr._bgrid._blocks;nb++) {
 	   for (int i=0;i<nsingleCap;i++) {
@@ -1356,7 +1414,10 @@ public:
 	     write_floats(f,crc, &buf[0], buf.size() );
 	   }
 	 }
-	 
+
+	 gsw1.Stop();
+	 gsw2.Start();
+
 	 // then write fixed precision basis vectors
 	 for (int nb=0;nb<pr._bgrid._blocks;nb++) {
 	   for (int i=nsingleCap;i<(int)pr._evec.size();i++) {
@@ -1365,42 +1426,56 @@ public:
 	     write_floats_fp16(f,crc, &buf[0], buf.size(), 24);
 	   }
 	 }
-	 
+
+	 gsw2.Stop();
 	 assert(coef._v[0]._grid->_isites*coef._v[0]._grid->_osites == pr._bgrid._blocks);
 
+	 gsw3.Start();
 	 for (int j=0;j<(int)coef.size();j++) {
-	   
+
+	   int64_t size1 = nsingleCap*2;
+	   int64_t size2 = 2*(pr._evec.size()-nsingleCap);
+	   int64_t size = size1;
+	   if (size2>size)
+	     size=size2;
+	   std::vector<float> buf(size);
+
 	   //RealD nrmTest = 0.0;
 	   for (int nb=0;nb<pr._bgrid._blocks;nb++) {
 	     // get local coordinate on coarse grid
 	     int ii, oi;
 	     canonical_block_to_coarse_coordinates(coef._v[0]._grid,nb,ii,oi);
 	     
-	     int l;
-	     std::vector<float> buf;
-	     for (l=0;l<nsingleCap;l++) {
-	       auto res = ((CoeffCoarse_t*)&coef._v[idx[j]]._odata[oi]._internal._internal[l])[ii];
-	       buf.push_back(res.real());
-	       buf.push_back(res.imag());
+	     gsw4.Start();
+#pragma omp parallel for
+	     for (int l=0;l<nsingleCap;l++) {
+	       auto res = ((CoeffCoarse_t*)&coef._v[j]._odata[oi]._internal._internal[l])[ii];
+	       buf[2*l+0] = res.real();
+	       buf[2*l+1] = res.imag();
 	       //nrmTest += res.real() * res.real() + res.imag() * res.imag();
 	     }
-	     write_floats(f,crc, &buf[0], buf.size() );
-	     buf.clear();
-	     for (l=nsingleCap;l<(int)pr._evec.size();l++) {
-	       auto res = ((CoeffCoarse_t*)&coef._v[idx[j]]._odata[oi]._internal._internal[l])[ii];
-	       buf.push_back(res.real());
-	       buf.push_back(res.imag());
+	     write_floats(f,crc, &buf[0], size1 );
+	     gsw4.Stop();
+#pragma omp parallel for
+	     for (int l=nsingleCap;l<(int)pr._evec.size();l++) {
+	       auto res = ((CoeffCoarse_t*)&coef._v[j]._odata[oi]._internal._internal[l])[ii];
+	       buf[2*(l-nsingleCap)+0] = res.real();
+	       buf[2*(l-nsingleCap)+1] = res.imag();
 	       //nrmTest += res.real() * res.real() + res.imag() * res.imag();
 	     }
-	     write_floats_fp16(f,crc, &buf[0], buf.size(), FP16_COEF_EXP_SHARE_FLOATS);
+	     write_floats_fp16(f,crc, &buf[0], size2, FP16_COEF_EXP_SHARE_FLOATS);
 	   }
 
 	   //_grid->GlobalSum(nrmTest);
 	   //std::cout << GridLogMessage << "Test norm: " << nrmTest << std::endl;
 	 }
+	 gsw3.Stop();
 
 	 off = ftello(f);	 
 	 fclose(f);
+
+	 std::cout<<GridLogMessage << "Timing: write single basis in " << gsw1.Elapsed() << " and fp16 in " << gsw2.Elapsed() << " and coefficients in " << gsw3.Elapsed() << " (" <<
+	   gsw4.Elapsed() << ")" << std::endl;
        }
      }
 	 
@@ -1409,7 +1484,7 @@ public:
      
      RealD totalGB = (RealD)off / 1024./1024./1024 * _grid->_Nprocessors;
      RealD seconds = gsw.useconds() / 1e6;
-     std::cout << GridLogMessage << "Write " << totalGB << " GB of compressed data at " << totalGB/seconds << " GB/s" << std::endl;
+     std::cout << GridLogMessage << "Write " << totalGB << " GB of compressed data at " << totalGB/seconds << " GB/s in " << seconds << " s" << std::endl;
 
      // gather crcs
      std::vector<uint32_t> crcs(_grid->_Nprocessors);
@@ -1431,7 +1506,7 @@ public:
 	 fprintf(f,"b[%d] = %d\n",i,pr._bgrid._bs[(i+1)%5]);
        for (int i=0;i<5;i++)
 	 fprintf(f,"nb[%d] = %d\n",i,pr._bgrid._nb[(i+1)%5]);
-       fprintf(f,"neig = %d\n",(int)idx.size());
+       fprintf(f,"neig = %d\n",(int)coef.size());
        fprintf(f,"nkeep = %d\n",(int)pr._evec.size());
        fprintf(f,"nkeep_single = %d\n",nsingle);
        fprintf(f,"blocks = %d\n",pr._bgrid._blocks);
@@ -2003,7 +2078,8 @@ until convergence
     void calc(DenseVector<RealD>& eval,
 	      BasisFieldVector<Field>& evec,
 	      const Field& src,
-	      int& Nconv)
+	      int& Nconv,
+	      bool reverse)
       {
 
 	GridBase *grid = evec._v[0]._grid;//evec.get(0 + evec_offset)._grid;
@@ -2021,11 +2097,15 @@ until convergence
 	{
 	  auto src_n = src;
 	  auto tmp = src;
-	  for (int i=0;i<5;i++) {
+	  const int _MAX_ITER_IRL_MEVAPP_ = 50;
+	  for (int i=0;i<_MAX_ITER_IRL_MEVAPP_;i++) {
 	    _HermOpTest(src_n,tmp);
 	    RealD vnum = real(innerProduct(src_n,tmp)); // HermOp.
 	    RealD vden = norm2(src_n);
-	    evalMaxApprox = vnum/vden;
+	    RealD na = vnum/vden;
+	    if (fabs(evalMaxApprox/na - 1.0) < 0.05)
+	      i=_MAX_ITER_IRL_MEVAPP_;
+	    evalMaxApprox = na;
 	    std::cout << GridLogMessage << " Approximation of largest eigenvalue: " << evalMaxApprox << std::endl;
 	    src_n = tmp;
 	  }
@@ -2227,6 +2307,8 @@ until convergence
       converged:
 
 	eval = eval2;
+	evec.sortInPlace(eval,reverse);
+
 	{
 	  
 	 // test

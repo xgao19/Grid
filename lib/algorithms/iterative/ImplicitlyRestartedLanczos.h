@@ -228,7 +228,7 @@ public:
       const int ndim = 5;
       assert(_nb.size() == ndim);
       std::vector<int> _nbc = { _nb[1], _nb[2], _nb[3], _nb[4], _nb[0] };
-      std::vector<int> _bsc = { _bs_cb[1], _bs_cb[2], _bs_cb[3], _bs_cb[4], _bs_cb[0] };
+      std::vector<int> _bsc = { _bs[1], _bs[2], _bs[3], _bs[4], _bs[0] };
       x0.resize(ndim);
 
       assert(cb >= 0);
@@ -240,13 +240,16 @@ public:
       for (i=0;i<ndim;i++) {
 	x0[i] *= _bsc[i];
       }
+
+      //if (cb < 2)
+      //	std::cout << GridLogMessage << "Map: " << cb << " To: " << x0 << std::endl;
     }
 
     void pokeBlockOfVectorCanonical(int cb,Field& v,const std::vector<float>& buf) {
-      std::vector<int> _bsc = { _bs_cb[1], _bs_cb[2], _bs_cb[3], _bs_cb[4], _bs_cb[0] };
+      std::vector<int> _bsc = { _bs[1], _bs[2], _bs[3], _bs[4], _bs[0] };
       std::vector<int> ldim = v._grid->LocalDimensions();
       std::vector<int> cldim = { ldim[1], ldim[2], ldim[3], ldim[4], ldim[0] };
-      const int _nbsc = _bsc[0]*_bsc[1]*_bsc[2]*_bsc[3]*_bsc[4];
+      const int _nbsc = _bs_cb[0]*_bs_cb[1]*_bs_cb[2]*_bs_cb[3]*_bs_cb[4];
       // take canonical block cb of v and put it in canonical ordering in buf
       std::vector<int> cx0;
       getCanonicalBlockOffset(cb,cx0);
@@ -258,7 +261,7 @@ public:
 
 #pragma omp for
 	for (int i=0;i<_nbsc;i++) {
-	  Lexicographic::CoorFromIndex(co0,i,_bsc);
+	  Lexicographic::CoorFromIndex(co0,2*i,_bsc); // 2* for eo
 	  for (int j=0;j<(int)_bsc.size();j++)
 	    cl0[j] = cx0[j] + co0[j];
 	  
@@ -266,6 +269,9 @@ public:
 	  int oi = v._grid->oIndex(l0);
 	  int ii = v._grid->iIndex(l0);
 	  int lti = i;
+
+	  //if (cb < 2 && i<2)
+	  //  std::cout << GridLogMessage << "Map: " << cb << ", " << i << " To: " << cl0 << ", " << cx0 << ", " << oi << ", " << ii << std::endl;
 	  
 	  for (int s=0;s<4;s++)
 	    for (int c=0;c<3;c++) {
@@ -278,10 +284,10 @@ public:
     }
 
     void peekBlockOfVectorCanonical(int cb,const Field& v,std::vector<float>& buf) {
-      std::vector<int> _bsc = { _bs_cb[1], _bs_cb[2], _bs_cb[3], _bs_cb[4], _bs_cb[0] };
+      std::vector<int> _bsc = { _bs[1], _bs[2], _bs[3], _bs[4], _bs[0] };
       std::vector<int> ldim = v._grid->LocalDimensions();
       std::vector<int> cldim = { ldim[1], ldim[2], ldim[3], ldim[4], ldim[0] };
-      const int _nbsc = _bsc[0]*_bsc[1]*_bsc[2]*_bsc[3]*_bsc[4];
+      const int _nbsc = _bs_cb[0]*_bs_cb[1]*_bs_cb[2]*_bs_cb[3]*_bs_cb[4];
       // take canonical block cb of v and put it in canonical ordering in buf
       std::vector<int> cx0;
       getCanonicalBlockOffset(cb,cx0);
@@ -295,7 +301,7 @@ public:
 
 #pragma omp for
 	for (int i=0;i<_nbsc;i++) {
-	  Lexicographic::CoorFromIndex(co0,i,_bsc);
+	  Lexicographic::CoorFromIndex(co0,2*i,_bsc); // 2* for eo
 	  for (int j=0;j<(int)_bsc.size();j++)
 	    cl0[j] = cx0[j] + co0[j];
 	  
@@ -304,6 +310,9 @@ public:
 	  int ii = v._grid->iIndex(l0);
 	  int lti = i;
 	  
+	  //if (cb < 2 && i<2)
+	  //  std::cout << GridLogMessage << "Map: " << cb << ", " << i << " To: " << cl0 << ", " << cx0 << ", " << oi << ", " << ii << std::endl;
+
 	  for (int s=0;s<4;s++)
 	    for (int c=0;c<3;c++) {
 	      Coeff_t& ld = ((Coeff_t*)&v._odata[oi]._internal._internal[s]._internal[c])[ii];

@@ -913,32 +913,77 @@ public:
      return read_argonne(ret,dir,nodes);
    }
 
-   static void write_bytes(void* buf, int64_t s, FILE* f, uint32_t& crc) {
-     static double data_counter = 0.0;
+   static void flush_bytes(FILE* f, std::vector<char>& fbuf) {
+     if (fbuf.size()) {
 
+       if (fwrite(&fbuf[0],fbuf.size(),1,f) != 1) {
+	 fprintf(stderr,"Write failed of %g GB!\n",(double)fbuf.size() / 1024./1024./1024.);
+	 exit(2);
+       }
+
+       fbuf.resize(0);
+
+     }
+   }
+
+   static void write_bytes(void* buf, int64_t s, FILE* f, std::vector<char>& fbuf, uint32_t& crc) {
+     static double data_counter = 0.0;
+     static GridStopWatch gsw_crc, gsw_flush1,gsw_flush2,gsw_write,gsw_memcpy;
      if (s == 0)
        return;
 
      // checksum
+     gsw_crc.Start();
      crc = crc32_threaded((unsigned char*)buf,s,crc);
+     gsw_crc.Stop();
 
-     GridStopWatch gsw;
-     gsw.Start();
-     if (fwrite(buf,s,1,f) != 1) {
-       fprintf(stderr,"Write failed of %g GB!\n",(double)s / 1024./1024./1024.);
-       exit(2);
+     if (s > fbuf.capacity()) {
+       // cannot buffer this, so first flush current buffer contents and then write this directly to file
+       gsw_flush1.Start();
+       flush_bytes(f,fbuf);
+       gsw_flush1.Stop();
+
+       gsw_write.Start();
+       if (fwrite(buf,s,1,f) != 1) {
+	 fprintf(stderr,"Write failed of %g GB!\n",(double)s / 1024./1024./1024.);
+	 exit(2);
+       }
+       gsw_write.Stop();
+
      }
-     gsw.Stop();
-     double secs = gsw.useconds() / 1000.0 / 1000.0;
+
+     // no room left in buffer, flush to disk
+     if (fbuf.size() + s > fbuf.capacity()) {
+       gsw_flush2.Start();
+       flush_bytes(f,fbuf);
+       gsw_flush2.Stop();
+     }
+
+     // then fill buffer again
+     {
+       gsw_memcpy.Start();
+       size_t t = fbuf.size();
+       fbuf.resize(t + s);
+       memcpy(&fbuf[t],buf,s);
+       gsw_memcpy.Stop();
+     }
+
      data_counter += (double)s;
-     if (data_counter > 1024.*1024.*256) {
-       printf("Writing at %g GB/s\n",(double)s / 1024./1024./1024. / secs);
+     if (data_counter > 1024.*1024.*20.) {
+       std::cout << GridLogMessage << "Writing " << ((double)data_counter / 1024./1024./1024.) << " GB at"
+	 " crc = " << gsw_crc.Elapsed() << " flush1 = " << gsw_flush1.Elapsed() << " flush2 = " << gsw_flush2.Elapsed() <<
+	 " write = " << gsw_write.Elapsed() << " memcpy = " << gsw_memcpy.Elapsed() << std::endl;
        data_counter = 0.0;
+       gsw_crc.Reset();
+       gsw_write.Reset();
+       gsw_memcpy.Reset();
+       gsw_flush1.Reset();
+       gsw_flush2.Reset();
      }
    }
 
-   static void write_floats(FILE* f, uint32_t& crc, float* buf, int64_t n) {
-     write_bytes(buf,n*sizeof(float),f,crc);
+   static void write_floats(FILE* f, std::vector<char>& fbuf, uint32_t& crc, float* buf, int64_t n) {
+     write_bytes(buf,n*sizeof(float),f,fbuf,crc);
    }
 
    void read_floats(char* & ptr, float* out, int64_t n) {
@@ -1023,7 +1068,7 @@ public:
    }
 
    template<typename OPT>
-   static void write_floats_fp16(FILE* f, uint32_t& crc, OPT* in, int64_t n, int nsc) {
+     static void write_floats_fp16(FILE* f, std::vector<char>& fbuf, uint32_t& crc, OPT* in, int64_t n, int nsc) {
 
      int64_t nsites = n / nsc;
      if (n % nsc) {
@@ -1070,7 +1115,7 @@ public:
 
      }
 
-     write_bytes(buf,sizeof(short)*(n + nsites),f,crc);
+     write_bytes(buf,sizeof(short)*(n + nsites),f,fbuf,crc);
 
      free(buf);
    }
@@ -1397,15 +1442,19 @@ public:
 	 assert(f);
 
 	 //buffer does not seem to help
-	 //setvbuf ( f , NULL , _IOFBF , 1024*1024*512 );
+	 //assert(!setvbuf ( f , NULL , _IOFBF , 1024*1024*2 ));
 	 	 
 	 int nsingleCap = nsingle;
 	 if (pr._evec.size() < nsingleCap)
 	   nsingleCap = pr._evec.size();
 	 
-	 GridStopWatch gsw1,gsw2,gsw3,gsw4;
+	 GridStopWatch gsw1,gsw2,gsw3,gsw4,gsw5;
 
 	 gsw1.Start();
+
+	 std::vector<char> fbuf;
+	 fbuf.reserve( 1024 * 1024 * 8 );
+
 	 // first write single precision basis vectors
 	 for (int nb=0;nb<pr._bgrid._blocks;nb++) {
 	   for (int i=0;i<nsingleCap;i++) {
@@ -1420,7 +1469,7 @@ public:
 	       std::cout << GridLogMessage << "Norm: " << nrm << std::endl;
 	     }
 #endif
-	     write_floats(f,crc, &buf[0], buf.size() );
+	     write_floats(f,fbuf,crc, &buf[0], buf.size() );
 	   }
 	 }
 
@@ -1432,7 +1481,7 @@ public:
 	   for (int i=nsingleCap;i<(int)pr._evec.size();i++) {
 	     std::vector<float> buf;
 	     pr._bgrid.peekBlockOfVectorCanonical(nb,pr._evec._v[i],buf);
-	     write_floats_fp16(f,crc, &buf[0], buf.size(), 24);
+	     write_floats_fp16(f,fbuf,crc, &buf[0], buf.size(), 24);
 	   }
 	 }
 
@@ -1456,23 +1505,23 @@ public:
 	     canonical_block_to_coarse_coordinates(coef._v[0]._grid,nb,ii,oi);
 	     
 	     gsw4.Start();
-#pragma omp parallel for
+	     gsw5.Start();
 	     for (int l=0;l<nsingleCap;l++) {
 	       auto res = ((CoeffCoarse_t*)&coef._v[j]._odata[oi]._internal._internal[l])[ii];
 	       buf[2*l+0] = res.real();
 	       buf[2*l+1] = res.imag();
 	       //nrmTest += res.real() * res.real() + res.imag() * res.imag();
 	     }
-	     write_floats(f,crc, &buf[0], size1 );
+	     gsw5.Stop();
+	     write_floats(f,fbuf,crc, &buf[0], size1 );
 	     gsw4.Stop();
-#pragma omp parallel for
 	     for (int l=nsingleCap;l<(int)pr._evec.size();l++) {
 	       auto res = ((CoeffCoarse_t*)&coef._v[j]._odata[oi]._internal._internal[l])[ii];
 	       buf[2*(l-nsingleCap)+0] = res.real();
 	       buf[2*(l-nsingleCap)+1] = res.imag();
 	       //nrmTest += res.real() * res.real() + res.imag() * res.imag();
 	     }
-	     write_floats_fp16(f,crc, &buf[0], size2, FP16_COEF_EXP_SHARE_FLOATS);
+	     write_floats_fp16(f,fbuf,crc, &buf[0], size2, FP16_COEF_EXP_SHARE_FLOATS);
 	   }
 
 	   //_grid->GlobalSum(nrmTest);
@@ -1480,11 +1529,13 @@ public:
 	 }
 	 gsw3.Stop();
 
+	 flush_bytes(f,fbuf);
+
 	 off = ftello(f);	 
 	 fclose(f);
 
 	 std::cout<<GridLogMessage << "Timing: write single basis in " << gsw1.Elapsed() << " and fp16 in " << gsw2.Elapsed() << " and coefficients in " << gsw3.Elapsed() << " (" <<
-	   gsw4.Elapsed() << ")" << std::endl;
+	   gsw4.Elapsed() << ", " << gsw5.Elapsed() << ")" << std::endl;
        }
      }
 	 

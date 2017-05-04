@@ -609,77 +609,7 @@ public:
    // zlib's crc32 gets 0.4 GB/s on KNL single thread
    // below gets 4.8 GB/s
    static uint32_t crc32_threaded(unsigned char* data, int64_t len, uint32_t previousCrc32 = 0) {
-     
      return crc32(previousCrc32,data,len);
-     
-     // below needs further tuning/testing
-     std::vector<uint32_t> partials;
-     std::vector<int64_t> lens;
-     int64_t len_part;
-     
-#pragma omp parallel shared(partials,lens,len_part)
-     {
-       int threads = omp_get_num_threads();
-       int thread  = omp_get_thread_num();
-       
-#pragma omp single
-       {
-	 partials.resize(threads);
-	 lens.resize(threads);
-	 assert(len % threads == 0); // for now 64 divides all our data, easy to generalize
-	 len_part = len / threads;
-       }
-       
-#pragma omp barrier
-       
-       partials[thread] = crc32(thread == 0 ? previousCrc32 : 0x0,data + len_part * thread,len_part);
-       lens[thread] = len_part;
-       
-       // reduction
-       while (lens.size() > 1) {
-	 
-	 uint32_t com_val;
-	 int64_t com_len;
-	 if (thread % 2 == 0) {
-	   if (thread + 1 < (int)partials.size()) {
-	     com_val = crc32_combine(partials[thread],partials[thread+1],lens[thread+1]);
-	     com_len = lens[thread] + lens[thread+1];
-	   } else if (thread + 1 == (int)partials.size()) {
-	     com_val = partials[thread];
-	     com_len = lens[thread];
-	   } else {
-	     com_len = -1; // inactive thread
-	   }
-	 } else {
-	   com_len = -1;
-	 }
-	 
-	 //std::cout << "Reducing in thread " << thread << " from lens.size() = " << lens.size() << " found " << com_len << std::endl;
-	 
-#pragma omp barrier
-	 
-#pragma omp single
-	 {
-	   partials.resize(0);
-	   lens.resize(0);
-	 }
-	 
-#pragma omp barrier
-	 
-#pragma omp critical
-	 {
-	   if (com_len != -1) {
-	     partials.push_back(com_val);
-	     lens.push_back(com_len);
-	   }
-	 }
-	 
-#pragma omp barrier
-       }	
-       
-     }
-     
-     return partials[0];
    }
 
    static int get_bfm_index( int* pos, int co, int* s ) {

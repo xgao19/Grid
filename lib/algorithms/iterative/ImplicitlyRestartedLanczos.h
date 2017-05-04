@@ -608,7 +608,7 @@ public:
 
    // zlib's crc32 gets 0.4 GB/s on KNL single thread
    // below gets 4.8 GB/s
-   uint32_t crc32_threaded(unsigned char* data, int64_t len, uint32_t previousCrc32 = 0) {
+   static uint32_t crc32_threaded(unsigned char* data, int64_t len, uint32_t previousCrc32 = 0) {
      
      return crc32(previousCrc32,data,len);
      
@@ -692,7 +692,7 @@ public:
      return regu_coor * ls * 48 + pos[0] * 48 + co * 4 + simd_coor * 2;
    }
    
-   void get_read_geometry(const GridBase* _grid,const std::vector<int>& cnodes,
+   static void get_read_geometry(const GridBase* _grid,const std::vector<int>& cnodes,
 			  std::map<int, std::vector<int> >& slots, 
 			  std::vector<int>& slot_lvol,
 			  std::vector<int>& lvol,
@@ -941,7 +941,7 @@ public:
      write_bytes(buf,n*sizeof(float),f,crc);
    }
 
-   void read_floats(char* & ptr, float* out, int64_t n) {
+   static void read_floats(char* & ptr, float* out, int64_t n) {
      float* in = (float*)ptr;
      ptr += 4*n;
 

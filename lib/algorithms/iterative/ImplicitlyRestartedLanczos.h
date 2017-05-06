@@ -541,10 +541,11 @@ public:
     int Nbasis = sizeof(in._odata[0]._internal._internal) / sizeof(in._odata[0]._internal._internal[0]);
     assert(Nbasis == _evec._Nm);
     
-    for (int j=0;j<_evec._Nm;j++) {
 #pragma omp parallel for
-      for (int b=0;b<_bgrid._o_blocks;b++)
+    for (int b=0;b<_bgrid._o_blocks;b++) {
+      for (int j=0;j<_evec._Nm;j++) {
 	_bgrid.block_caxpy(b,out,in._odata[b]._internal._internal[j],_evec._v[j],out);
+      }
     }
     
   }
@@ -560,9 +561,9 @@ public:
     Field tmp(_bgrid._grid);
     tmp = in;
     
-    for (int j=0;j<_evec._Nm;j++) {
 #pragma omp parallel for
-      for (int b=0;b<_bgrid._o_blocks;b++) {
+    for (int b=0;b<_bgrid._o_blocks;b++) {
+      for (int j=0;j<_evec._Nm;j++) {
 	// |rhs> -= <j|rhs> |j>
 	auto c = _bgrid.block_sp(b,_evec._v[j],tmp);
 	_bgrid.block_caxpy(b,tmp,-c,_evec._v[j],tmp); // may make this more numerically stable

@@ -2070,7 +2070,8 @@ until convergence
 	      BasisFieldVector<Field>& evec,
 	      const Field& src,
 	      int& Nconv,
-	      bool reverse)
+	      bool reverse,
+	      int SkipTest)
       {
 
 	GridBase *grid = evec._v[0]._grid;//evec.get(0 + evec_offset)._grid;
@@ -2105,6 +2106,7 @@ until convergence
 	DenseVector<RealD> lme(Nm);  
 	DenseVector<RealD> lme2(Nm);
 	DenseVector<RealD> eval2(Nm);
+	DenseVector<RealD> eval2_copy(Nm);
 	DenseVector<RealD> Qt(Nm*Nm);
 
 
@@ -2162,6 +2164,8 @@ until convergence
 	  std::cout<<GridLogMessage <<"IRL:: diagonalize: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
 	  
 	  // sorting
+	  eval2_copy = eval2;
+
 	  _sort.push(eval2,Nm);
 	  t1=usecond()/1e6;
 	  std::cout<<GridLogMessage <<"IRL:: eval sorting: "<<t1-t0<< "seconds"<<std::endl; t0=t1;
@@ -2171,6 +2175,7 @@ until convergence
 	  for(int ip=0; ip<k2; ++ip){
 	    std::cout<<GridLogMessage << "eval "<< ip << " "<< eval2[ip] << std::endl;
 	  }
+
 	  for(int ip=k2; ip<Nm; ++ip){ 
 	    std::cout<<GridLogMessage << "qr_decomp "<< ip << " "<< eval2[ip] << std::endl;
 	    qr_decomp(eval,lme,Nm,Nm,Qt,eval2[ip],k1,Nm);
@@ -2204,6 +2209,8 @@ until convergence
 	  for(int k=0; k<Nm; ++k){    
 	    eval2[k] = eval[k];
 	    lme2[k] = lme[k];
+
+	    std::cout<<GridLogMessage << "eval2[" << k << "] = " << eval2[k] << std::endl;
 	  }
 	  setUnit_Qt(Nm,Qt);
 	  diagonalize(eval2,lme2,Nk,Nm,Qt,grid);
@@ -2225,7 +2232,7 @@ until convergence
 	      std::cout << GridLogMessage << "Test convergence" << std::endl;
 	      Field B(grid);
 	      
-	      for(int j = 0; j<Nk; ++j){
+	      for(int j = 0; j<Nk; j+=SkipTest){
 		B=evec[j];
 		//std::cout << "Checkerboard: " << evec[j].checkerboard << std::endl; 
 		B.checkerboard = evec[0].checkerboard;
@@ -2240,14 +2247,14 @@ until convergence
 		RealD vv = norm2(v) / ::pow(evalMaxApprox,2.0);
 		std::cout.precision(13);
 		std::cout<<GridLogMessage << "[" << std::setw(3)<< std::setiosflags(std::ios_base::right) <<j<<"] "
-			 <<"eval = "<<std::setw(25)<< std::setiosflags(std::ios_base::left)<< eval2[j]
+			 <<"eval = "<<std::setw(25)<< std::setiosflags(std::ios_base::left)<< eval2[j] << " (" << eval2_copy[j] << ")"
 			 <<" |H B[i] - eval[i]B[i]|^2 / evalMaxApprox^2 " << std::setw(25)<< std::setiosflags(std::ios_base::right)<< vv
 			 <<" "<< vnum/(sqrt(vden)*sqrt(vv0))
 			 << " norm(B["<<j<<"])="<< vden <<std::endl;
 		
 		// change the criteria as evals are supposed to be sorted, all evals smaller(larger) than Nstop should have converged
 		if((vv<eresid*eresid) && (j == Nconv) ){
-		  ++Nconv;
+		  Nconv+=SkipTest;
 		}
 	      }
 	      
@@ -2297,13 +2304,25 @@ until convergence
 	
       converged:
 
-	eval = eval2;
+	if (SkipTest == 1) {
+	  eval = eval2;
+	} else {
+
+	  // test quickly
+	  for (int j=0;j<Nstop;j+=SkipTest) {
+	    std::cout<<GridLogMessage << "Eigenvalue[" << j << "] = " << eval2[j] << " (" << eval2_copy[j] << ")" << std::endl;
+	  }
+
+	  eval2_copy.resize(eval2.size());
+	  eval = eval2_copy;
+	}
+
 	evec.sortInPlace(eval,reverse);
 
 	{
 	  
 	 // test
-	 for (int j=0;j<Nconv;j++) {
+	 for (int j=0;j<Nstop;j++) {
 	   std::cout<<GridLogMessage << " |e[" << j << "]|^2 = " << norm2(evec[j]) << std::endl;
 	 }
        }

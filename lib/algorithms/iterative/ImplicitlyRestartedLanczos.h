@@ -69,7 +69,7 @@ public:
   std::vector<int> _bs_cb; // block size in checkerboarded vector
   std::vector<int> _nb_o; // number of blocks of simd o-sites
 
-  int _nd, _blocks, _cf_size, _cf_block_size, _o_blocks, _block_sites;
+  int _nd, _blocks, _cf_size, _cf_block_size, _cf_o_block_size, _o_blocks, _block_sites;
   
   BlockedGrid(GridBase* grid, const std::vector<int>& block_size) :
     _grid(grid), _bs(block_size), _nd((int)_bs.size()), 
@@ -103,6 +103,7 @@ public:
 
     _cf_size *= 12 / 2;
     _cf_block_size = _cf_size / _blocks;
+    _cf_o_block_size = _cf_size / _o_blocks;
 
     std::cout << GridLogMessage << "BlockedGrid:" << std::endl;
     std::cout << GridLogMessage << " _l     = " << _l << std::endl;
@@ -170,6 +171,38 @@ public:
 
     }
 
+    vCoeff_t block_sp(int b, const Field& x, const std::vector< ComplexD >& y) {
+
+      std::vector<int> x0;
+      block_to_coor(b,x0);
+
+      constexpr int nsimd = sizeof(vCoeff_t) / sizeof(Coeff_t);
+      int lsize = _cf_o_block_size / _block_sites;
+
+      std::vector< ComplexD > ret(nsimd);
+      for (int i=0;i<nsimd;i++)
+	ret[i] = 0.0;
+
+      for (int i=0;i<_block_sites;i++) { // only odd sites
+	int ss = block_site_to_o_site(x0,i);
+
+	int n = lsize / nsimd;
+	for (int l=0;l<n;l++) {
+	  for (int j=0;j<nsimd;j++) {
+	    int t = lsize * i + l*nsimd + j;
+
+	    ret[j] += conjugate(((Coeff_t*)&x._odata[ss]._internal)[l*nsimd + j]) * y[t];
+	  }
+	}
+      }
+
+      vCoeff_t vret;
+      for (int i=0;i<nsimd;i++)
+	((Coeff_t*)&vret)[i] = (Coeff_t)ret[i];
+
+      return vret;
+
+    }
 
     template<class T>
       void vcaxpy(iScalar<T>& r,const vCoeff_t& a,const iScalar<T>& x,const iScalar<T>& y) {
@@ -194,6 +227,59 @@ public:
       for (int i=0;i<_block_sites;i++) { // only odd sites
 	int ss = block_site_to_o_site(x0,i);
 	vcaxpy(ret._odata[ss],a,x._odata[ss],y._odata[ss]);
+      }
+
+    }
+
+    void block_caxpy(int b, std::vector< ComplexD >& ret, const vCoeff_t& a, const Field& x, const std::vector< ComplexD >& y) {
+      std::vector<int> x0;
+      block_to_coor(b,x0);
+
+      constexpr int nsimd = sizeof(vCoeff_t) / sizeof(Coeff_t);
+      int lsize = _cf_o_block_size / _block_sites;
+
+      for (int i=0;i<_block_sites;i++) { // only odd sites
+	int ss = block_site_to_o_site(x0,i);
+
+	int n = lsize / nsimd;
+	for (int l=0;l<n;l++) {
+	  vCoeff_t r = a* ((vCoeff_t*)&x._odata[ss]._internal)[l];
+
+	  for (int j=0;j<nsimd;j++) {
+	    int t = lsize * i + l*nsimd + j;
+	    ret[t] = y[t] + ((Coeff_t*)&r)[j];
+	  }
+	}
+      }
+
+    }
+
+    void block_set(int b, Field& ret, const std::vector< ComplexD >& x) {
+      std::vector<int> x0;
+      block_to_coor(b,x0);
+
+      int lsize = _cf_o_block_size / _block_sites;
+
+      for (int i=0;i<_block_sites;i++) { // only odd sites
+	int ss = block_site_to_o_site(x0,i);
+
+	for (int l=0;l<lsize;l++)
+	  ((Coeff_t*)&ret._odata[ss]._internal)[l] = (Coeff_t)x[lsize * i + l]; // convert precision
+      }
+
+    }
+
+    void block_get(int b, const Field& ret, std::vector< ComplexD >& x) {
+      std::vector<int> x0;
+      block_to_coor(b,x0);
+
+      int lsize = _cf_o_block_size / _block_sites;
+
+      for (int i=0;i<_block_sites;i++) { // only odd sites
+	int ss = block_site_to_o_site(x0,i);
+
+	for (int l=0;l<lsize;l++)
+	  x[lsize * i + l] = (ComplexD)((Coeff_t*)&ret._odata[ss]._internal)[l];
       }
 
     }
@@ -494,7 +580,17 @@ class BasisFieldVector {
 
  }; 
 
- template<typename Field>
+/*
+  BlockProjector
+
+  If _HP_BLOCK_PROJECTORS_ is defined, we assume that _evec is a basis that is not
+  fully orthonormalized (to the precision of the coarse field) and we allow for higher-precision
+  coarse field than basis field.
+
+*/
+//#define _HP_BLOCK_PROJECTORS_
+
+template<typename Field>
 class BlockProjector {
 public:
 
@@ -504,28 +600,28 @@ public:
   BlockProjector(BasisFieldVector<Field>& evec, BlockedGrid<Field>& bgrid) : _evec(evec), _bgrid(bgrid) {
   }
 
-  void createOrthogonalBasis() {
+  void createOrthogonalBasis(int niter = 1) {
 
     GridStopWatch sw;
     sw.Start();
 
-    for (int i=0;i<_evec._Nm;i++) {
-      
-      // |i> -= <j|i> |j>
-      for (int j=0;j<i;j++) {
-
 #pragma omp parallel for
-	for (int b=0;b<_bgrid._o_blocks;b++) {
-	  _bgrid.block_caxpy(b,_evec._v[i],-_bgrid.block_sp(b,_evec._v[j],_evec._v[i]),_evec._v[j],_evec._v[i]);
+    for (int b=0;b<_bgrid._o_blocks;b++) {
+
+      for (int n=0;n<niter;n++) {
+
+	for (int i=0;i<_evec._Nm;i++) {
+	  
+	  // |i> -= <j|i> |j>
+	  for (int j=0;j<i;j++) {
+	    _bgrid.block_caxpy(b,_evec._v[i],-_bgrid.block_sp(b,_evec._v[j],_evec._v[i]),_evec._v[j],_evec._v[i]);
+	  }
+	  
+	  auto nrm = _bgrid.block_sp(b,_evec._v[i],_evec._v[i]);
+	  _bgrid.block_cscale(b,1.0 / sqrt(nrm),_evec._v[i]);
+	  
 	}
       }
-      
-#pragma omp parallel for
-      for (int b=0;b<_bgrid._o_blocks;b++) {
-	auto nrm = _bgrid.block_sp(b,_evec._v[i],_evec._v[i]);
-	_bgrid.block_cscale(b,1.0 / sqrt(nrm),_evec._v[i]);
-      }
-      
     }
     sw.Stop();
     std::cout << GridLogMessage << "Gram-Schmidt to create blocked basis took " << sw.Elapsed() << std::endl;
@@ -547,7 +643,7 @@ public:
 	_bgrid.block_caxpy(b,out,in._odata[b]._internal._internal[j],_evec._v[j],out);
       }
     }
-    
+
   }
 
   template<typename CoarseField>
@@ -557,6 +653,7 @@ public:
 
     int Nbasis = sizeof(out._odata[0]._internal._internal) / sizeof(out._odata[0]._internal._internal[0]);
     assert(Nbasis == _evec._Nm);
+
 
     Field tmp(_bgrid._grid);
     tmp = in;
@@ -1669,7 +1766,7 @@ public:
 
     RealD OrthoTime;
 
-    RealD eresid;
+    RealD eresid, betastp;
     SortEigen<Field> _sort;
     LinearFunction<Field> &_HermOp;
     LinearFunction<Field> &_HermOpTest;
@@ -1684,6 +1781,7 @@ public:
 			       int _Nk, // sought vecs
 			       int _Nm, // spare vecs
 			       RealD _eresid, // resid in lmdue deficit 
+			       RealD _betastp, // if beta(k) < betastp: converged
 			       int _Niter, // Max iterations
 			       int _Nminres) :
       _HermOp(HermOp),
@@ -1692,6 +1790,7 @@ public:
       Nk(_Nk),
       Nm(_Nm),
       eresid(_eresid),
+      betastp(_betastp),
       Niter(_Niter),
       Nminres(_Nminres)
     { 
@@ -1704,6 +1803,7 @@ public:
 			       int _Nk, // sought vecs
 			       int _Nm, // spare vecs
 			       RealD _eresid, // resid in lmdue deficit 
+			       RealD _betastp, // if beta(k) < betastp: converged
 			       int _Niter, // Max iterations
 			       int _Nminres) : 
       _HermOp(HermOp),
@@ -1712,6 +1812,7 @@ public:
       Nk(_Nk),
       Nm(_Nm),
       eresid(_eresid),
+      betastp(_betastp),
       Niter(_Niter),
       Nminres(_Nminres)
     { 
@@ -2264,7 +2365,7 @@ until convergence
 	      
 	      std::cout<<GridLogMessage<<" #modes converged: "<<Nconv<<std::endl;
 	      
-	      if( Nconv>=Nstop ){
+	      if( Nconv>=Nstop || beta_k < betastp){
 		goto converged;
 	      }
 	      

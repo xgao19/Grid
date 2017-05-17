@@ -600,7 +600,7 @@ public:
   BlockProjector(BasisFieldVector<Field>& evec, BlockedGrid<Field>& bgrid) : _evec(evec), _bgrid(bgrid) {
   }
 
-  void createOrthogonalBasis(int niter = 1) {
+  void createOrthonormalBasis(int niter = 1) {
 
     GridStopWatch sw;
     sw.Start();
@@ -618,6 +618,9 @@ public:
 	  }
 	  
 	  auto nrm = _bgrid.block_sp(b,_evec._v[i],_evec._v[i]);
+
+	  // TODO: if norm is too small, remove this eigenvector/mark as not needed; in practice: set it to zero norm here and return a mask
+	  // that is then used later to decide not to write certain eigenvectors to disk (add a norm calculation before subtraction step and look at nrm/nrm0 < eps to decide)
 	  _bgrid.block_cscale(b,1.0 / sqrt(nrm),_evec._v[i]);
 	  
 	}

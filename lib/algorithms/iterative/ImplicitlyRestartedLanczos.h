@@ -33,6 +33,8 @@ Author: Christoph Lehner <clehner@bnl.gov>
 
 #include <Grid/Eigen/Dense>
 
+#define USE_LAPACK
+
 #include <string.h> //memset
 #ifdef USE_LAPACK
 #ifdef USE_MKL
@@ -600,17 +602,23 @@ public:
   BlockProjector(BasisFieldVector<Field>& evec, BlockedGrid<Field>& bgrid) : _evec(evec), _bgrid(bgrid) {
   }
 
-  void createOrthonormalBasis(int niter = 1) {
+  void createOrthonormalBasis(RealD thres = 0.0) {
 
     GridStopWatch sw;
     sw.Start();
 
-#pragma omp parallel for
-    for (int b=0;b<_bgrid._o_blocks;b++) {
+    int cnt = 0;
 
-      for (int n=0;n<niter;n++) {
+#pragma omp parallel shared(cnt)
+    {
+      int lcnt = 0;
 
+#pragma omp for
+      for (int b=0;b<_bgrid._o_blocks;b++) {
+	
 	for (int i=0;i<_evec._Nm;i++) {
+	  
+	  auto nrm0 = _bgrid.block_sp(b,_evec._v[i],_evec._v[i]);
 	  
 	  // |i> -= <j|i> |j>
 	  for (int j=0;j<i;j++) {
@@ -618,16 +626,28 @@ public:
 	  }
 	  
 	  auto nrm = _bgrid.block_sp(b,_evec._v[i],_evec._v[i]);
-
+	  
+	  auto eps = nrm/nrm0;
+	  if (Reduce(eps).real() < thres) {
+	    lcnt++;
+	  }
+	  
 	  // TODO: if norm is too small, remove this eigenvector/mark as not needed; in practice: set it to zero norm here and return a mask
 	  // that is then used later to decide not to write certain eigenvectors to disk (add a norm calculation before subtraction step and look at nrm/nrm0 < eps to decide)
 	  _bgrid.block_cscale(b,1.0 / sqrt(nrm),_evec._v[i]);
 	  
 	}
+	
+      }
+
+#pragma omp critical
+      {
+	cnt += lcnt;
       }
     }
     sw.Stop();
-    std::cout << GridLogMessage << "Gram-Schmidt to create blocked basis took " << sw.Elapsed() << std::endl;
+    std::cout << GridLogMessage << "Gram-Schmidt to create blocked basis took " << sw.Elapsed() << " (" << ((RealD)cnt / (RealD)_bgrid._o_blocks / (RealD)_evec._Nm) 
+	      << " below threshold)" << std::endl;
 
   }
 
@@ -1947,7 +1967,8 @@ public:
     }
 
 #ifdef USE_LAPACK
-#define LAPACK_INT long long
+#define LAPACK_INT int
+//long long
     void diagonalize_lapack(DenseVector<RealD>& lmd,
 		     DenseVector<RealD>& lme, 
 		     int N1,
@@ -1983,7 +2004,7 @@ public:
   char uplo = 'U'; // refer to upper half of original matrix
   char compz = 'I'; // Compute eigenvectors of tridiagonal matrix
   int ifail[NN];
-  long long info;
+  LAPACK_INT info;
 //  int total = QMP_get_number_of_nodes();
 //  int node = QMP_get_node_number();
 //  GridBase *grid = evec[0]._grid;

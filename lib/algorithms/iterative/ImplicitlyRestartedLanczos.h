@@ -33,21 +33,18 @@ Author: Christoph Lehner <clehner@bnl.gov>
 
 #include <Grid/Eigen/Dense>
 
-#define USE_LAPACK
+#define USE_LAPACK_IRL
 
 #include <string.h> //memset
-#ifdef USE_LAPACK
-#ifdef USE_MKL
-#include<mkl_lapack.h>
-#else
-void LAPACK_dstegr(char *jobz, char *range, int *n, double *d, double *e,
-                   double *vl, double *vu, int *il, int *iu, double *abstol,
-                   int *m, double *w, double *z, int *ldz, int *isuppz,
-                   double *work, int *lwork, int *iwork, int *liwork,
-                   int *info);
-//#include <lapacke/lapacke.h>
+#ifdef USE_LAPACK_IRL
+extern "C" void dstegr(char *jobz, char *range, int *n, double *d, double *e,
+		       double *vl, double *vu, int *il, int *iu, double *abstol,
+		       int *m, double *w, double *z, int *ldz, int *isuppz,
+		       double *work, int *lwork, int *iwork, int *liwork,
+		       int *info);
 #endif
-#endif
+
+
 #include "DenseMatrix.h"
 #include "EigenSort.h"
 #include <zlib.h>
@@ -1966,95 +1963,99 @@ public:
       }
     }
 
-#ifdef USE_LAPACK
+#ifdef USE_LAPACK_IRL
 #define LAPACK_INT int
 //long long
     void diagonalize_lapack(DenseVector<RealD>& lmd,
-		     DenseVector<RealD>& lme, 
-		     int N1,
-		     int N2,
-		     DenseVector<RealD>& Qt,
-		     GridBase *grid){
-  const int size = Nm;
-//  tevals.resize(size);
-//  tevecs.resize(size);
-  LAPACK_INT NN = N1;
-  double evals_tmp[NN];
-  double evec_tmp[NN][NN];
-  memset(evec_tmp[0],0,sizeof(double)*NN*NN);
-//  double AA[NN][NN];
-  double DD[NN];
-  double EE[NN];
-  for (int i = 0; i< NN; i++)
-    for (int j = i - 1; j <= i + 1; j++)
-      if ( j < NN && j >= 0 ) {
-        if (i==j) DD[i] = lmd[i];
-        if (i==j) evals_tmp[i] = lmd[i];
-        if (j==(i-1)) EE[j] = lme[j];
+			    DenseVector<RealD>& lme, 
+			    int N1,
+			    int N2,
+			    DenseVector<RealD>& Qt,
+			    GridBase *grid){
+
+      std::cout << GridLogMessage << "diagonalize_lapack start\n";
+      GridStopWatch gsw;
+
+      const int size = Nm;
+      //  tevals.resize(size);
+      //  tevecs.resize(size);
+      LAPACK_INT NN = N1;
+      std::vector<double> evals_tmp(NN);
+      std::vector<double> evec_tmp(NN*NN);
+      memset(&evec_tmp[0],0,sizeof(double)*NN*NN);
+      //  double AA[NN][NN];
+      std::vector<double> DD(NN);
+      std::vector<double> EE(NN);
+      for (int i = 0; i< NN; i++)
+	for (int j = i - 1; j <= i + 1; j++)
+	  if ( j < NN && j >= 0 ) {
+	    if (i==j) DD[i] = lmd[i];
+	    if (i==j) evals_tmp[i] = lmd[i];
+	    if (j==(i-1)) EE[j] = lme[j];
+	  }
+      LAPACK_INT evals_found;
+      LAPACK_INT lwork = ( (18*NN) > (1+4*NN+NN*NN)? (18*NN):(1+4*NN+NN*NN)) ;
+      LAPACK_INT liwork =  3+NN*10 ;
+      std::vector<LAPACK_INT> iwork(liwork);
+      std::vector<double> work(lwork);
+      std::vector<LAPACK_INT> isuppz(2*NN);
+      char jobz = 'V'; // calculate evals & evecs
+      char range = 'I'; // calculate all evals
+      //    char range = 'A'; // calculate all evals
+      char uplo = 'U'; // refer to upper half of original matrix
+      char compz = 'I'; // Compute eigenvectors of tridiagonal matrix
+      std::vector<int> ifail(NN);
+      LAPACK_INT info;
+      //  int total = QMP_get_number_of_nodes();
+      //  int node = QMP_get_node_number();
+      //  GridBase *grid = evec[0]._grid;
+      int total = grid->_Nprocessors;
+      int node = grid->_processor;
+      int interval = (NN/total)+1;
+      double vl = 0.0, vu = 0.0;
+      LAPACK_INT il = interval*node+1 , iu = interval*(node+1);
+      if (iu > NN)  iu=NN;
+      double tol = 0.0;
+      if (1) {
+	memset(&evals_tmp[0],0,sizeof(double)*NN);
+	if ( il <= NN){
+	  std::cout << GridLogMessage << "dstegr started" << std::endl; 
+	  gsw.Start();
+	  dstegr(&jobz, &range, &NN,
+		 (double*)&DD[0], (double*)&EE[0],
+		 &vl, &vu, &il, &iu, // these four are ignored if second parameteris 'A'
+		 &tol, // tolerance
+		 &evals_found, &evals_tmp[0], (double*)&evec_tmp[0], &NN,
+		 &isuppz[0],
+		 &work[0], &lwork, &iwork[0], &liwork,
+		 &info);
+	  gsw.Stop();
+	  std::cout << GridLogMessage << "dstegr completed in " << gsw.Elapsed() << std::endl;
+	  for (int i = iu-1; i>= il-1; i--){
+	    evals_tmp[i] = evals_tmp[i - (il-1)];
+	    if (il>1) evals_tmp[i-(il-1)]=0.;
+	    for (int j = 0; j< NN; j++){
+	      evec_tmp[i*NN + j] = evec_tmp[(i - (il-1)) * NN + j];
+	      if (il>1) evec_tmp[(i-(il-1)) * NN + j]=0.;
+	    }
+	  }
+	}
+	{
+	  //        QMP_sum_double_array(evals_tmp,NN);
+	  //        QMP_sum_double_array((double *)evec_tmp,NN*NN);
+	  grid->GlobalSumVector(&evals_tmp[0],NN);
+	  grid->GlobalSumVector(&evec_tmp[0],NN*NN);
+	}
+      } 
+      // cheating a bit. It is better to sort instead of just reversing it, but the document of the routine says evals are sorted in increasing order. qr gives evals in decreasing order.
+      for(int i=0;i<NN;i++){
+	for(int j=0;j<NN;j++)
+	  Qt[(NN-1-i)*N2+j]=evec_tmp[i*NN + j];
+	lmd [NN-1-i]=evals_tmp[i];
       }
-  LAPACK_INT evals_found;
-  LAPACK_INT lwork = ( (18*NN) > (1+4*NN+NN*NN)? (18*NN):(1+4*NN+NN*NN)) ;
-  LAPACK_INT liwork =  3+NN*10 ;
-  LAPACK_INT iwork[liwork];
-  double work[lwork];
-  LAPACK_INT isuppz[2*NN];
-  char jobz = 'V'; // calculate evals & evecs
-  char range = 'I'; // calculate all evals
-  //    char range = 'A'; // calculate all evals
-  char uplo = 'U'; // refer to upper half of original matrix
-  char compz = 'I'; // Compute eigenvectors of tridiagonal matrix
-  int ifail[NN];
-  LAPACK_INT info;
-//  int total = QMP_get_number_of_nodes();
-//  int node = QMP_get_node_number();
-//  GridBase *grid = evec[0]._grid;
-  int total = grid->_Nprocessors;
-  int node = grid->_processor;
-  int interval = (NN/total)+1;
-  double vl = 0.0, vu = 0.0;
-  LAPACK_INT il = interval*node+1 , iu = interval*(node+1);
-  if (iu > NN)  iu=NN;
-  double tol = 0.0;
-    if (1) {
-      memset(evals_tmp,0,sizeof(double)*NN);
-      if ( il <= NN){
-        printf("total=%d node=%d il=%d iu=%d\n",total,node,il,iu);
-#ifdef USE_MKL
-        dstegr(&jobz, &range, &NN,
-#else
-        LAPACK_dstegr(&jobz, &range, &NN,
-#endif
-            (double*)DD, (double*)EE,
-            &vl, &vu, &il, &iu, // these four are ignored if second parameteris 'A'
-            &tol, // tolerance
-            &evals_found, evals_tmp, (double*)evec_tmp, &NN,
-            isuppz,
-            work, &lwork, iwork, &liwork,
-            &info);
-        for (int i = iu-1; i>= il-1; i--){
-          printf("node=%d evals_found=%d evals_tmp[%d] = %g\n",node,evals_found, i - (il-1),evals_tmp[i - (il-1)]);
-          evals_tmp[i] = evals_tmp[i - (il-1)];
-          if (il>1) evals_tmp[i-(il-1)]=0.;
-          for (int j = 0; j< NN; j++){
-            evec_tmp[i][j] = evec_tmp[i - (il-1)][j];
-            if (il>1) evec_tmp[i-(il-1)][j]=0.;
-          }
-        }
-      }
-      {
-//        QMP_sum_double_array(evals_tmp,NN);
-//        QMP_sum_double_array((double *)evec_tmp,NN*NN);
-         grid->GlobalSumVector(evals_tmp,NN);
-         grid->GlobalSumVector((double*)evec_tmp,NN*NN);
-      }
-    } 
-// cheating a bit. It is better to sort instead of just reversing it, but the document of the routine says evals are sorted in increasing order. qr gives evals in decreasing order.
-  for(int i=0;i<NN;i++){
-    for(int j=0;j<NN;j++)
-      Qt[(NN-1-i)*N2+j]=evec_tmp[i][j];
-      lmd [NN-1-i]=evals_tmp[i];
-  }
-}
+
+      std::cout << GridLogMessage << "diagonalize_lapack complete\n";
+    }
 #undef LAPACK_INT 
 #endif
 
@@ -2067,7 +2068,7 @@ public:
 		     GridBase *grid)
     {
 
-#ifdef USE_LAPACK
+#ifdef USE_LAPACK_IRL
     const int check_lapack=0; // just use lapack if 0, check against lapack if 1
 
     if(!check_lapack)
@@ -2113,7 +2114,7 @@ public:
 	  }
 	}
 	Niter = iter;
-#ifdef USE_LAPACK
+#ifdef USE_LAPACK_IRL
     if(check_lapack){
 	const double SMALL=1e-8;
 	diagonalize_lapack(lmd2,lme2,N2,N1,Qt2,grid);

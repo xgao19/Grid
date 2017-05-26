@@ -727,7 +727,20 @@ public:
    // zlib's crc32 gets 0.4 GB/s on KNL single thread
    // below gets 4.8 GB/s
    static uint32_t crc32_threaded(unsigned char* data, int64_t len, uint32_t previousCrc32 = 0) {
-     return crc32(previousCrc32,data,len);
+
+     // crc32 of zlib was incorrect for very large sizes, so do it block-wise
+     uint32_t crc = previousCrc32;
+     off_t blk = 0;
+     off_t step = 1024*1024*1024;
+     while (len > step) {
+       crc = crc32(crc,&data[blk],step);
+       blk += step;
+       len -= step;
+     }
+
+     crc = crc32(crc,&data[blk],len);
+     return crc;
+
    }
 
    static int get_bfm_index( int* pos, int co, int* s ) {
@@ -1302,7 +1315,8 @@ public:
        uint32_t crc_comp = crc32_threaded((unsigned char*)&raw_in[0],size,0);
 
        if (crc_comp != crc32[slot]) {
-	 fprintf(stderr,"Node %s found crc mismatch for file %s\n",hostname,buf); fflush(stderr);
+	 std::cout << "Node " << hostname << " found crc mismatch for file " << buf << " (" << std::hex << crc_comp << " vs " << crc32[slot] << std::dec << ")" << std::endl;
+	 std::cout << "Byte size: " << size << std::endl;
        }
 
        _grid->Barrier();

@@ -82,11 +82,11 @@ int main(int argc, char** argv) {
   std::vector < std::complex<double>  > omegas;
 #if 0
   for(int i=0;i<Ls;i++){
-	double imag = 0.;
-	if (i==0) imag=1.;
-	if (i==Ls-1) imag=-1.;
-	std::complex<double> temp (0.25+0.01*i, imag*0.01);
-	omegas.push_back(temp);
+    double imag = 0.;
+    if (i==0) imag=1.;
+    if (i==Ls-1) imag=-1.;
+    std::complex<double> temp (0.25+0.01*i, imag*0.01);
+    omegas.push_back(temp);
   }
 #else
   omegas.push_back( std::complex<double>(1.45806438985048,-0) );
@@ -100,6 +100,7 @@ int main(int argc, char** argv) {
   omegas.push_back( std::complex<double>(0.0686324988446592,0.0550658530827402) );
   omegas.push_back( std::complex<double>(0.0686324988446592,-0.0550658530827402) );
 #endif
+
   ZMobiusFermionR Ddwf(Umu, *FGrid, *FrbGrid, *UGrid, *UrbGrid, mass, M5, omegas,1.,0.);
 
   LatticeFermion src_o(FrbGrid);

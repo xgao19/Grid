@@ -44,9 +44,8 @@ extern "C" void dstegr(char *jobz, char *range, int *n, double *d, double *e,
 		       int *info);
 #endif
 
-
-#include "DenseMatrix.h"
-#include "EigenSort.h"
+#include <Grid/algorithms/densematrix/DenseMatrix.h>
+#include <Grid/algorithms/iterative/EigenSort.h>
 #include <zlib.h>
 #include <sys/stat.h>
 // eliminate temorary vector in calc()
@@ -1255,6 +1254,7 @@ public:
      assert(pr._evec.size() == nkeep); // needs to be the same since this is compile-time fixed
      coef.resize(neig);
 
+
      // now get read geometry
      std::map<int, std::vector<int> > slots;
      std::vector<int> slot_lvol, lvol;
@@ -1274,7 +1274,7 @@ public:
      int nperdir = ntotal / 32;
      if (nperdir < 1)
        nperdir=1;
-   
+
      // load all necessary slots and store them appropriately
      for (auto sl=slots.begin();sl!=slots.end();sl++) {
        std::vector<int>& idx = sl->second;
@@ -1310,7 +1310,7 @@ public:
 
        RealD totalGB = (RealD)size / 1024./1024./1024 * _grid->_Nprocessors;
        RealD seconds = gsw.useconds() / 1e6;
-       std::cout << GridLogMessage << "Read " << totalGB << " GB of compressed data at " << totalGB/seconds << " GB/s" << std::endl;
+       std::cout << GridLogMessage << "[" << slot << "]  Read " << totalGB << " GB of compressed data at " << totalGB/seconds << " GB/s" << std::endl;
 
        uint32_t crc_comp = crc32_threaded((unsigned char*)&raw_in[0],size,0);
 

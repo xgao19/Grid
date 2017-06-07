@@ -1420,6 +1420,10 @@ public:
 	 
        }
 
+       // set checkerboard
+       for (int i=0;i<(int)pr._evec.size();i++)
+	 pr._evec._v[i].checkerboard = Odd;
+
        gsw2.Stop();
        seconds=gsw2.useconds()/1e6;
        std::cout << GridLogMessage << "Processed " << totalGB << " GB of compressed data at " << totalGB/seconds << " GB/s" << std::endl;

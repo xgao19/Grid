@@ -576,6 +576,15 @@ class BasisFieldVector {
 
   }
 
+  void deflate(const std::vector<RealD>& eval,const Field& src_orig,Field& result) {
+    result = zero;
+    int N = (int)_v.size();
+    for (int i=0;i<N;i++) {
+      Field& tmp = _v[i];
+      axpy(result,TensorRemove(innerProduct(tmp,src_orig)) / eval[i],tmp,result);
+    }
+  }
+
  }; 
 
 /*

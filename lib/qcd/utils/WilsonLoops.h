@@ -73,7 +73,8 @@ public:
   //////////////////////////////////////////////////
   // trace of directed plaquette oriented in mu,nu plane
   //////////////////////////////////////////////////
-  static void traceDirPlaquette(LatticeComplex &plaq,
+  template<typename LatticeComplexT>
+  static void traceDirPlaquette(LatticeComplexT &plaq,
                                 const std::vector<GaugeMat> &U, const int mu,
                                 const int nu) {
     GaugeMat sp(U[0]._grid);
@@ -83,9 +84,15 @@ public:
   //////////////////////////////////////////////////
   // sum over all planes of plaquette
   //////////////////////////////////////////////////
-  static void sitePlaquette(LatticeComplex &Plaq,
+  template<typename LatticeComplexT>
+  static void sitePlaquette(LatticeComplexT &Plaq,
                             const std::vector<GaugeMat> &U) {
-    LatticeComplex sitePlaq(U[0]._grid);
+
+
+    typedef typename GaugeLorentz::vector_type vCoeff_t;
+    typedef typename GaugeLorentz::scalar_type Coeff_t;
+
+    Lattice< iSinglet<vCoeff_t > > sitePlaq(U[0]._grid);
     Plaq = zero;
     for (int mu = 1; mu < Nd; mu++) {
       for (int nu = 0; nu < mu; nu++) {
@@ -104,11 +111,14 @@ public:
       U[mu] = PeekIndex<LorentzIndex>(Umu, mu);
     }
 
-    LatticeComplex Plaq(Umu._grid);
+    typedef typename GaugeLorentz::vector_type vCoeff_t;
+    typedef typename GaugeLorentz::scalar_type Coeff_t;
+
+    Lattice< iSinglet<vCoeff_t > > Plaq(Umu._grid);
 
     sitePlaquette(Plaq, U);
-    TComplex Tp = sum(Plaq);
-    Complex p = TensorRemove(Tp);
+    iSinglet< Coeff_t > Tp = sum(Plaq);
+    Coeff_t p = TensorRemove(Tp);
     return p.real();
   }
 
@@ -129,15 +139,18 @@ public:
   static RealD linkTrace(const GaugeLorentz &Umu) {
     std::vector<GaugeMat> U(Nd, Umu._grid);
 
-    LatticeComplex Tr(Umu._grid);
+    typedef typename GaugeLorentz::vector_type vCoeff_t;
+    typedef typename GaugeLorentz::scalar_type Coeff_t;
+
+    Lattice< iSinglet<vCoeff_t > > Tr(Umu._grid);
     Tr = zero;
     for (int mu = 0; mu < Nd; mu++) {
       U[mu] = PeekIndex<LorentzIndex>(Umu, mu);
       Tr = Tr + trace(U[mu]);
     }
 
-    TComplex Tp = sum(Tr);
-    Complex p = TensorRemove(Tp);
+    iSinglet< Coeff_t > Tp = sum(Tr);
+    Coeff_t p = TensorRemove(Tp);
 
     double vol = Umu._grid->gSites();
 

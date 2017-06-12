@@ -97,9 +97,12 @@ namespace Grid {
     template<class GaugeField>
     inline void NerscStatistics(GaugeField & data,NerscField &header)
     {
+      typedef typename GaugeField::vector_type vCoeff_t;
+      typedef PeriodicGaugeImpl< GaugeImplTypes< vCoeff_t, Nc > > PeriodicGimplZ;
+
       // How to convert data precision etc...
-      header.link_trace=Grid::QCD::WilsonLoops<PeriodicGimplR>::linkTrace(data);
-      header.plaquette =Grid::QCD::WilsonLoops<PeriodicGimplR>::avgPlaquette(data);
+      header.link_trace=Grid::QCD::WilsonLoops<PeriodicGimplZ>::linkTrace(data);
+      header.plaquette =Grid::QCD::WilsonLoops<PeriodicGimplZ>::avgPlaquette(data);
     }
 
     inline void NerscMachineCharacteristics(NerscField &header)
@@ -131,7 +134,8 @@ namespace Grid {
     {
       BinaryIO::Uint32Checksum(buf,buf_size_bytes,csum);
     }
-    inline void reconstruct3(LorentzColourMatrix & cm)
+    template<typename sobj>
+    inline void reconstruct3(sobj & cm)
     {
       const int x=0;
       const int y=1;
@@ -334,6 +338,9 @@ namespace Grid {
       {
       typedef Lattice<iLorentzColourMatrix<vsimd> > GaugeField;
 
+      typedef iLorentzColourMatrix<vsimd> vobj;
+      typedef typename vobj::scalar_object sobj;
+
       GridBase *grid = Umu._grid;
       int offset = readHeader(file,Umu._grid,header);
 
@@ -353,38 +360,38 @@ namespace Grid {
       if ( ieee32 || ieee32big ) {
 #ifdef PARALLEL_READ
 	csum=BinaryIO::readObjectParallel<iLorentzColourMatrix<vsimd>, LorentzColour2x3F> 
-	  (Umu,file,Nersc3x2munger<LorentzColour2x3F,LorentzColourMatrix>(), offset,format);
+	  (Umu,file,Nersc3x2munger<LorentzColour2x3F,sobj >(), offset,format);
 #else
 	csum=BinaryIO::readObjectSerial<iLorentzColourMatrix<vsimd>, LorentzColour2x3F> 
-	  (Umu,file,Nersc3x2munger<LorentzColour2x3F,LorentzColourMatrix>(), offset,format);
+	  (Umu,file,Nersc3x2munger<LorentzColour2x3F,sobj >(), offset,format);
 #endif
       }
       if ( ieee64 || ieee64big ) {
 #ifdef PARALLEL_READ
 	csum=BinaryIO::readObjectParallel<iLorentzColourMatrix<vsimd>, LorentzColour2x3D> 
-	  (Umu,file,Nersc3x2munger<LorentzColour2x3D,LorentzColourMatrix>(),offset,format);
+	  (Umu,file,Nersc3x2munger<LorentzColour2x3D,sobj >(),offset,format);
 #else 
 	csum=BinaryIO::readObjectSerial<iLorentzColourMatrix<vsimd>, LorentzColour2x3D> 
-	  (Umu,file,Nersc3x2munger<LorentzColour2x3D,LorentzColourMatrix>(),offset,format);
+	  (Umu,file,Nersc3x2munger<LorentzColour2x3D,sobj >(),offset,format);
 #endif
       }
       } else if ( header.data_type == std::string("4D_SU3_GAUGE_3x3") ) {
 	if ( ieee32 || ieee32big ) {
 #ifdef PARALLEL_READ
 	  csum=BinaryIO::readObjectParallel<iLorentzColourMatrix<vsimd>,LorentzColourMatrixF>
-	    (Umu,file,NerscSimpleMunger<LorentzColourMatrixF,LorentzColourMatrix>(),offset,format);
+	    (Umu,file,NerscSimpleMunger<LorentzColourMatrixF,sobj >(),offset,format);
 #else
 	  csum=BinaryIO::readObjectSerial<iLorentzColourMatrix<vsimd>,LorentzColourMatrixF>
-	    (Umu,file,NerscSimpleMunger<LorentzColourMatrixF,LorentzColourMatrix>(),offset,format);
+	    (Umu,file,NerscSimpleMunger<LorentzColourMatrixF,sobj >(),offset,format);
 #endif
 	}
 	if ( ieee64 || ieee64big ) {
 #ifdef PARALLEL_READ
 	  csum=BinaryIO::readObjectParallel<iLorentzColourMatrix<vsimd>,LorentzColourMatrixD>
-	    (Umu,file,NerscSimpleMunger<LorentzColourMatrixD,LorentzColourMatrix>(),offset,format);
+	    (Umu,file,NerscSimpleMunger<LorentzColourMatrixD,sobj >(),offset,format);
 #else
 	  csum=BinaryIO::readObjectSerial<iLorentzColourMatrix<vsimd>,LorentzColourMatrixD>
-	    (Umu,file,NerscSimpleMunger<LorentzColourMatrixD,LorentzColourMatrix>(),offset,format);
+	    (Umu,file,NerscSimpleMunger<LorentzColourMatrixD,sobj >(),offset,format);
 #endif
 	}
       } else {

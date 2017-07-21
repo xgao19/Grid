@@ -400,12 +400,23 @@ CartesianCommunicator::CartesianCommunicator(const std::vector<int> &processors)
   GroupCoor.resize(_ndimension);
   WorldCoor.resize(_ndimension);
 
-  int dim = 0;
-  for(int l2=0;l2<log2size;l2++){
-    while ( (WorldDims[dim] / ShmDims[dim]) <= 1 ) dim=(dim+1)%_ndimension;
-    ShmDims[dim]*=2;
-    dim=(dim+1)%_ndimension;
+  char* _ShmDims = getenv("SHM_DIMS");
+  if (!_ShmDims) {
+    int dim = 0;
+    for(int l2=0;l2<log2size;l2++){
+      while ( (WorldDims[dim] / ShmDims[dim]) <= 1 ) dim=(dim+1)%_ndimension;
+      ShmDims[dim]*=2;
+      dim=(dim+1)%_ndimension;
+    }
+  } else {
+    assert( sscanf(_ShmDims,"%d.%d.%d.%d",
+		   &ShmDims[_ndimension-4],
+		   &ShmDims[_ndimension-3],
+		   &ShmDims[_ndimension-2],
+		   &ShmDims[_ndimension-1]) == 4 );
   }
+
+  std::cout << GridLogMessage << "ShmDims = " << ShmDims << std::endl;
 
   ////////////////////////////////////////////////////////////////
   // Establish torus of processes and nodes with sub-blockings
@@ -413,6 +424,8 @@ CartesianCommunicator::CartesianCommunicator(const std::vector<int> &processors)
   for(int d=0;d<_ndimension;d++){
     GroupDims[d] = WorldDims[d]/ShmDims[d];
   }
+
+  std::cout << GridLogMessage << "GroupDims = " << GroupDims << std::endl;
 
   ////////////////////////////////////////////////////////////////
   // Verbose

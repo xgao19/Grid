@@ -240,7 +240,7 @@ namespace Grid {
           for(int idx=0;idx<sgrid->lSites();idx++) {
             sgrid->LocalIndexToLocalCoor(idx,cbuf);
             peekLocalSite(s,result,cbuf);
-            cbuf[dim]+=p*L;
+            cbuf[dim]+=((sgrid->_processor_coor[dim]+p) % processors[dim])*L;
             pokeLocalSite(s,pgbuf,cbuf);
           }
         }

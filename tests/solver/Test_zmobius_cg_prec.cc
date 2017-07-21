@@ -43,7 +43,11 @@ Gamma::Algebra Gmu[] = {Gamma::Algebra::GammaX, Gamma::Algebra::GammaY, Gamma::A
 int main(int argc, char** argv) {
   Grid_init(&argc, &argv);
 
-  const int Ls = 10;
+  char* _Ls = getenv("Ls");
+  if (!_Ls)
+    _Ls = "10";
+  int Ls = atoi(_Ls);
+  
 
   GridCartesian* UGrid = SpaceTimeGrid::makeFourDimGrid(
       GridDefaultLatt(), GridDefaultSimd(Nd, vComplex::Nsimd()),
@@ -80,7 +84,7 @@ int main(int argc, char** argv) {
   RealD mass = 0.01;
   RealD M5 = 1.8;
   std::vector < std::complex<double>  > omegas;
-#if 0
+#if 1
   for(int i=0;i<Ls;i++){
     double imag = 0.;
     if (i==0) imag=1.;
@@ -111,7 +115,7 @@ int main(int argc, char** argv) {
   GridStopWatch CGTimer;
 
   SchurDiagMooeeOperator<ZMobiusFermionR, LatticeFermion> HermOpEO(Ddwf);
-  ConjugateGradient<LatticeFermion> CG(1.0e-8, 10000, 0);// switch off the assert
+  ConjugateGradient<LatticeFermion> CG(1.0e-8, 200, 0);// switch off the assert
 
   CGTimer.Start();
   CG(HermOpEO, src_o, result_o);

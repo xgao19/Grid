@@ -93,7 +93,10 @@ public:
       _block_sites *= _bs_cb[i];
       _nb[i] = _l[i] / _bs[i];
       _nb_o[i] = _nb[i] / _grid->_simd_layout[i];
-      assert(!(_nb[i] % _grid->_simd_layout[i])); // simd must accommodate choice of blocksize
+      if (_nb[i] % _grid->_simd_layout[i]) { // simd must accommodate choice of blocksize
+	std::cout << GridLogMessage << "Problem: _nb[" << i << "] = " << _nb[i] << " _grid->_simd_layout[" << i << "] = " << _grid->_simd_layout[i] << std::endl;
+	assert(0);
+      }
       _blocks *= _nb[i];
       _o_blocks *= _nb_o[i];
       _cf_size *= _l[i];
@@ -460,13 +463,27 @@ class BasisFieldVector {
   typedef typename vobj::scalar_object sobj;
 
   std::vector<Field> _v; // _Nfull vectors
-  
-  BasisFieldVector(int Nm,GridBase* value) : _Nm(Nm), _v(Nm,value) {
 
-    std::cout << GridLogMessage << "BasisFieldVector initialized:\n";
-    std::cout << GridLogMessage << " Nm = " << Nm << "\n";
-    std::cout << GridLogMessage << " Size of full vectors = " << 
-      ((double)_v.size()*sizeof(vobj)*value->oSites() / 1024./1024./1024.) << " GB\n";
+  void report(int n,GridBase* value) {
+
+    std::cout << GridLogMessage << "BasisFieldVector allocated:\n";
+    std::cout << GridLogMessage << " Delta N = " << n << "\n";
+    std::cout << GridLogMessage << " Size of full vectors (size) = " << 
+      ((double)n*sizeof(vobj)*value->oSites() / 1024./1024./1024.) << " GB\n";
+    std::cout << GridLogMessage << " Size = " << _v.size() << " Capacity = " << _v.capacity() << std::endl;
+
+    value->Barrier();
+
+    if (value->IsBoss()) {
+      system("cat /proc/meminfo");
+    }
+
+    value->Barrier();
+
+  }
+
+  BasisFieldVector(int Nm,GridBase* value) : _Nm(Nm), _v(Nm,value) {
+    report(Nm,value);
   }
   
   ~BasisFieldVector() {
@@ -513,8 +530,17 @@ class BasisFieldVector {
   }
 
   void resize(int n) {
-    _Nm = n;
+    if (n > _Nm)
+      _v.reserve(n);
+    
     _v.resize(n,_v[0]._grid);
+
+    if (n < _Nm)
+      _v.shrink_to_fit();
+
+    report(n - _Nm,_v[0]._grid);
+
+    _Nm = n;
   }
 
   std::vector<int> getIndex(DenseVector<RealD>& sort_vals) {

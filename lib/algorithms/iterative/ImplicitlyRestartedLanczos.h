@@ -1216,7 +1216,7 @@ public:
    }
 
    template<typename Field,typename CoarseField>
-     static bool read_compressed_vectors(const char* dir,BlockProjector<Field>& pr,BasisFieldVector<CoarseField>& coef) {
+     static bool read_compressed_vectors(const char* dir,BlockProjector<Field>& pr,BasisFieldVector<CoarseField>& coef, int ngroups = 1) {
 
      const BasisFieldVector<Field>& basis = pr._evec;
      GridBase* _grid = basis._v[0]._grid;
@@ -1224,6 +1224,8 @@ public:
      // for error messages
      char hostname[1024];
      gethostname(hostname, 1024);
+
+     std::cout << GridLogMessage << "Ready on host " << hostname << " with " << ngroups << " reader groups" << std::endl;
 
      // first read metadata
      char buf[4096];
@@ -1241,6 +1243,8 @@ public:
        status=f ? 1 : 0;
      }
      _grid->GlobalSum(status);
+     std::cout << GridLogMessage << "Read params status " << status << std::endl;
+
      if (!status) {
        return false;
      }
@@ -1310,158 +1314,176 @@ public:
      if (nperdir < 1)
        nperdir=1;
 
-     // load all necessary slots and store them appropriately
-     for (auto sl=slots.begin();sl!=slots.end();sl++) {
-       std::vector<int>& idx = sl->second;
-       int slot = sl->first;
-       std::vector<float> rdata;
+     // add read groups
+     for (int ngroup=0;ngroup<ngroups;ngroup++) {
+
+       bool action = _grid->ThisRank() % ngroups == ngroup;
        
-       char buf[4096];
+       std::cout << GridLogMessage << "Reading in group " << ngroup << " / " << ngroups << std::endl;
+
+       // load all necessary slots and store them appropriately
+       for (auto sl=slots.begin();sl!=slots.end();sl++) {
+
+	 std::vector<int>& idx = sl->second;
+	 int slot = sl->first;
+	 std::vector<float> rdata;
        
-       // load one slot vector
-       sprintf(buf,"%s/%2.2d/%10.10d.compressed",dir,slot/nperdir,slot);
-       f = fopen(buf,"rb");
-       if (!f) {
-	 fprintf(stderr,"Node %s cannot read %s\n",hostname,buf); fflush(stderr);
-	 return false;
-       }
-
-       uint32_t crc = 0x0;
-       off_t size;
-
-       GridStopWatch gsw;
-       _grid->Barrier();
-       gsw.Start();
-
-       fseeko(f,0,SEEK_END);
-       size = ftello(f);
-       fseeko(f,0,SEEK_SET);
-
-       std::vector<char> raw_in(size);
-       assert(fread(&raw_in[0],size,1,f) == 1);
-
-       _grid->Barrier();
-       gsw.Stop();
-
-       RealD totalGB = (RealD)size / 1024./1024./1024 * _grid->_Nprocessors;
-       RealD seconds = gsw.useconds() / 1e6;
-       std::cout << GridLogMessage << "[" << slot << "]  Read " << totalGB << " GB of compressed data at " << totalGB/seconds << " GB/s" << std::endl;
-
-       uint32_t crc_comp = crc32_threaded((unsigned char*)&raw_in[0],size,0);
-
-       if (crc_comp != crc32[slot]) {
-	 std::cout << "Node " << hostname << " found crc mismatch for file " << buf << " (" << std::hex << crc_comp << " vs " << crc32[slot] << std::dec << ")" << std::endl;
-	 std::cout << "Byte size: " << size << std::endl;
-       }
-
-       _grid->Barrier();
+	 char buf[4096];
        
-       assert(crc_comp == crc32[slot]);
-    
-       fclose(f);
+	 if (action) {
+	   // load one slot vector
+	   sprintf(buf,"%s/%2.2d/%10.10d.compressed",dir,slot/nperdir,slot);
+	   f = fopen(buf,"rb");
+	   if (!f) {
+	     fprintf(stderr,"Node %s cannot read %s\n",hostname,buf); fflush(stderr);
+	     return false;
+	   }
+	 }
 
-       char* ptr = &raw_in[0];
+	 uint32_t crc = 0x0;
+	 off_t size;
+	   
+	 GridStopWatch gsw;
+	 _grid->Barrier();
+	 gsw.Start();
+	 
+	 std::vector<char> raw_in(0);
+	 if (action) {
+	   fseeko(f,0,SEEK_END);
+	   size = ftello(f);
+	   fseeko(f,0,SEEK_SET);
 
-       GridStopWatch gsw2;
-       gsw2.Start();
-       {
-	 int nsingleCap = nkeep_single;
-	 if (pr._evec.size() < nsingleCap)
-	   nsingleCap = pr._evec.size();
+	   raw_in.resize(size);
+	   assert(fread(&raw_in[0],size,1,f) == 1);
+	 }
 
-	 int _cf_block_size = slot_lsites * 12 / 2 / blocks;
+	 _grid->Barrier();
+	 gsw.Stop();
 
+	 RealD totalGB = (RealD)size / 1024./1024./1024 * _grid->_Nprocessors;
+	 RealD seconds = gsw.useconds() / 1e6;
+
+	 if (action) {
+	   std::cout << GridLogMessage << "[" << slot << "]  Read " << totalGB << " GB of compressed data at " << totalGB/seconds << " GB/s" << std::endl;
+	   
+	   uint32_t crc_comp = crc32_threaded((unsigned char*)&raw_in[0],size,0);
+	   
+	   if (crc_comp != crc32[slot]) {
+	     std::cout << "Node " << hostname << " found crc mismatch for file " << buf << " (" << std::hex << crc_comp << " vs " << crc32[slot] << std::dec << ")" << std::endl;
+	     std::cout << "Byte size: " << size << std::endl;
+	   }
+
+	   assert(crc_comp == crc32[slot]);
+	 }
+
+	 _grid->Barrier();
+       
+	 if (action) {
+	   fclose(f);
+	 }
+
+	 char* ptr = &raw_in[0];
+	 
+	 GridStopWatch gsw2;
+	 gsw2.Start();
+	 if (action) {
+	   int nsingleCap = nkeep_single;
+	   if (pr._evec.size() < nsingleCap)
+	     nsingleCap = pr._evec.size();
+	   
+	   int _cf_block_size = slot_lsites * 12 / 2 / blocks;
+	   
 #define FP_16_SIZE(a,b)  (( (a) + (a/b) )*2)
-	 
-	 // first read single precision basis vectors
+	   
+	   // first read single precision basis vectors
 #pragma omp parallel
-	 {
-	   std::vector<float> buf(_cf_block_size * 2);
-#pragma omp for
-	   for (int nb=0;nb<blocks;nb++) {
-	     for (int i=0;i<nsingleCap;i++) {
-               char* lptr = ptr + buf.size()*(i + nsingleCap*nb)*4;
-	       read_floats(lptr, &buf[0], buf.size() );
-	       int mnb = pr._bgrid.globalToLocalCanonicalBlock(slot,_nn,nb);
-	       if (mnb != -1)
-		 pr._bgrid.pokeBlockOfVectorCanonical(mnb,pr._evec._v[i],buf);
-	     }
-	   }
-
-#pragma omp barrier
-#pragma omp single
 	   {
-	     ptr = ptr + buf.size()*nsingleCap*blocks*4;
-	   }
-
-	 }
-
-	 // TODO: at this point I should add a checksum test for block_sp(nb,v,v) for all blocks, then I would know that the mapping
-	 // to blocks is OK at this point; after that ...
-	 
-	 // then read fixed precision basis vectors
-#pragma omp parallel
-	 {
-	   std::vector<float> buf(_cf_block_size * 2);
+	     std::vector<float> buf(_cf_block_size * 2);
 #pragma omp for
-	   for (int nb=0;nb<blocks;nb++) {
-	     for (int i=nsingleCap;i<(int)pr._evec.size();i++) {
-	       char* lptr = ptr + FP_16_SIZE( buf.size(), 24 )*((i-nsingleCap) + (pr._evec.size() - nsingleCap)*nb);
-	       read_floats_fp16(lptr, &buf[0], buf.size(), 24);
-	       int mnb = pr._bgrid.globalToLocalCanonicalBlock(slot,_nn,nb);
-	       if (mnb != -1)
-		 pr._bgrid.pokeBlockOfVectorCanonical(mnb,pr._evec._v[i],buf);
-	     }
-	   }
-
-#pragma omp barrier
-#pragma omp single
-	   {
-	     ptr = ptr + FP_16_SIZE( buf.size()*(pr._evec.size() - nsingleCap)*blocks, 24 );
-	   }
-	 }
-	 
-#pragma omp parallel
-	 {
-	   std::vector<float> buf1(nkeep_single*2);
-	   std::vector<float> buf2((nkeep - nkeep_single)*2);
-
-#pragma omp for
-	   for (int j=0;j<(int)coef.size();j++)
 	     for (int nb=0;nb<blocks;nb++) {
-	       // get local coordinate on coarse grid
-	       int ii,oi;
-	       int mnb = pr._bgrid.globalToLocalCanonicalBlock(slot,_nn,nb);
-	       if (mnb != -1)
-		 canonical_block_to_coarse_coordinates(coef._v[0]._grid,mnb,ii,oi);
-
-	       char* lptr = ptr + (4*buf1.size() + FP_16_SIZE(buf2.size(), _FP16_COEF_EXP_SHARE_FLOATS))*(nb + j*blocks);
-	       int l;
-	       read_floats(lptr, &buf1[0], buf1.size() );
-	       if (mnb != -1) {
-		 for (l=0;l<nkeep_single;l++) {
-		   ((CoeffCoarse_t*)&coef._v[j]._odata[oi]._internal._internal[l])[ii] = CoeffCoarse_t(buf1[2*l+0],buf1[2*l+1]);
-		 }
+	       for (int i=0;i<nsingleCap;i++) {
+		 char* lptr = ptr + buf.size()*(i + nsingleCap*nb)*4;
+		 read_floats(lptr, &buf[0], buf.size() );
+		 int mnb = pr._bgrid.globalToLocalCanonicalBlock(slot,_nn,nb);
+		 if (mnb != -1)
+		   pr._bgrid.pokeBlockOfVectorCanonical(mnb,pr._evec._v[i],buf);
 	       }
-	       read_floats_fp16(lptr, &buf2[0], buf2.size(), _FP16_COEF_EXP_SHARE_FLOATS);
-	       if (mnb != -1) {
-		 for (l=nkeep_single;l<nkeep;l++) {
-		   ((CoeffCoarse_t*)&coef._v[j]._odata[oi]._internal._internal[l])[ii] = CoeffCoarse_t(buf2[2*(l-nkeep_single)+0],buf2[2*(l-nkeep_single)+1]);
-		 }
-	       }
-
 	     }
-          }
+	     
+#pragma omp barrier
+#pragma omp single
+	     {
+	       ptr = ptr + buf.size()*nsingleCap*blocks*4;
+	     }
+	     
+	   }
+	   
+	   // TODO: at this point I should add a checksum test for block_sp(nb,v,v) for all blocks, then I would know that the mapping
+	   // to blocks is OK at this point; after that ...
+	   
+	   // then read fixed precision basis vectors
+#pragma omp parallel
+	   {
+	     std::vector<float> buf(_cf_block_size * 2);
+#pragma omp for
+	     for (int nb=0;nb<blocks;nb++) {
+	       for (int i=nsingleCap;i<(int)pr._evec.size();i++) {
+		 char* lptr = ptr + FP_16_SIZE( buf.size(), 24 )*((i-nsingleCap) + (pr._evec.size() - nsingleCap)*nb);
+		 read_floats_fp16(lptr, &buf[0], buf.size(), 24);
+		 int mnb = pr._bgrid.globalToLocalCanonicalBlock(slot,_nn,nb);
+		 if (mnb != -1)
+		   pr._bgrid.pokeBlockOfVectorCanonical(mnb,pr._evec._v[i],buf);
+	       }
+	     }
+	     
+#pragma omp barrier
+#pragma omp single
+	     {
+	       ptr = ptr + FP_16_SIZE( buf.size()*(pr._evec.size() - nsingleCap)*blocks, 24 );
+	     }
+	   }
+	   
+#pragma omp parallel
+	   {
+	     std::vector<float> buf1(nkeep_single*2);
+	     std::vector<float> buf2((nkeep - nkeep_single)*2);
+	     
+#pragma omp for
+	     for (int j=0;j<(int)coef.size();j++)
+	       for (int nb=0;nb<blocks;nb++) {
+		 // get local coordinate on coarse grid
+		 int ii,oi;
+		 int mnb = pr._bgrid.globalToLocalCanonicalBlock(slot,_nn,nb);
+		 if (mnb != -1)
+		   canonical_block_to_coarse_coordinates(coef._v[0]._grid,mnb,ii,oi);
+		 
+		 char* lptr = ptr + (4*buf1.size() + FP_16_SIZE(buf2.size(), _FP16_COEF_EXP_SHARE_FLOATS))*(nb + j*blocks);
+		 int l;
+		 read_floats(lptr, &buf1[0], buf1.size() );
+		 if (mnb != -1) {
+		   for (l=0;l<nkeep_single;l++) {
+		     ((CoeffCoarse_t*)&coef._v[j]._odata[oi]._internal._internal[l])[ii] = CoeffCoarse_t(buf1[2*l+0],buf1[2*l+1]);
+		   }
+		 }
+		 read_floats_fp16(lptr, &buf2[0], buf2.size(), _FP16_COEF_EXP_SHARE_FLOATS);
+		 if (mnb != -1) {
+		   for (l=nkeep_single;l<nkeep;l++) {
+		     ((CoeffCoarse_t*)&coef._v[j]._odata[oi]._internal._internal[l])[ii] = CoeffCoarse_t(buf2[2*(l-nkeep_single)+0],buf2[2*(l-nkeep_single)+1]);
+		   }
+		 }
+		 
+	       }
+	   }
+	   
+	   // set checkerboard
+	   for (int i=0;i<(int)pr._evec.size();i++)
+	     pr._evec._v[i].checkerboard = Odd;
 	 
+	   gsw2.Stop();
+	   seconds=gsw2.useconds()/1e6;
+	   std::cout << GridLogMessage << "Processed " << totalGB << " GB of compressed data at " << totalGB/seconds << " GB/s" << std::endl;
+	 }
        }
-
-       // set checkerboard
-       for (int i=0;i<(int)pr._evec.size();i++)
-	 pr._evec._v[i].checkerboard = Odd;
-
-       gsw2.Stop();
-       seconds=gsw2.useconds()/1e6;
-       std::cout << GridLogMessage << "Processed " << totalGB << " GB of compressed data at " << totalGB/seconds << " GB/s" << std::endl;
      }
 #undef FP_16_SIZE
      return true;

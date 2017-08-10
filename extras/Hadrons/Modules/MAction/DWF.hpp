@@ -125,7 +125,7 @@ void TDWF<FImpl>::execute(void)
     auto &grb4   = *env().getRbGrid();
     auto &g5     = *env().getGrid(par().Ls);
     auto &grb5   = *env().getRbGrid(par().Ls);
-    std::vector<Complex> boundary = strToVec<Complex>(par().boundary);
+    std::vector<ComplexD> boundary = strToVec<ComplexD>(par().boundary);
     typename DomainWallFermion<FImpl>::ImplParams implParams(boundary);
     FMat *fMatPt = new DomainWallFermion<FImpl>(U, g5, grb5, g4, grb4,
                                                 par().mass, par().M5,

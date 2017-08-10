@@ -102,6 +102,40 @@ void *CartesianCommunicator::ShmBufferTranslate(int rank,void * local_p)
   }
 }
 
+
+void report_pages_for_pointer(void* ShmCommBuf, size_t MAX_MPI_SHM_BYTES) {
+  memset(ShmCommBuf, 0, MAX_MPI_SHM_BYTES);
+  int fd = open("/proc/self/pagemap", O_RDONLY);
+  assert(fd >= 0);
+  const int page_size = 4096;
+  uint64_t virt_pfn = (uint64_t)ShmCommBuf / page_size;
+  off_t offset = sizeof(uint64_t) * virt_pfn;
+  uint64_t npages = MAX_MPI_SHM_BYTES / page_size;
+  uint64_t pagedata[npages];
+  uint64_t ret = lseek(fd, offset, SEEK_SET);
+  assert(ret == offset);
+  ret = ::read(fd, pagedata, sizeof(uint64_t)*npages);
+  assert(ret == sizeof(uint64_t) * npages);
+  int nhugepages = npages / 512;
+  int n4ktotal, nnothuge;
+  n4ktotal = 0;
+  nnothuge = 0;
+  for (int i = 0; i < nhugepages; ++i) {
+    uint64_t baseaddr = (pagedata[i*512] & 0x7fffffffffffffULL) * page_size;
+    for (int j = 0; j < 512; ++j) {
+      uint64_t pageaddr = (pagedata[i*512+j] & 0x7fffffffffffffULL) * page_size;
+      ++n4ktotal;
+      if (pageaddr != baseaddr + j * page_size)
+	++nnothuge;
+    }
+  }
+
+  char hn[256];
+  gethostname(hn,256);
+  printf("[%s]  Allocated %d 4k pages, %d not in huge pages\n", hn, n4ktotal, nnothuge);
+}
+
+
 void CartesianCommunicator::Init(int *argc, char ***argv) {
 
   int flag;
@@ -198,6 +232,7 @@ void CartesianCommunicator::Init(int *argc, char ***argv) {
 
 #if 1
   char shm_name [NAME_MAX];
+  int fhugetlb = (getenv("USE_HUGETLB")) ? MAP_HUGETLB|MAP_ANONYMOUS : 0x0; //this does not work without hugetblfs?
   if ( ShmRank == 0 ) {
     for(int r=0;r<ShmSize;r++){
 
@@ -210,10 +245,18 @@ void CartesianCommunicator::Init(int *argc, char ***argv) {
       if ( fd < 0 ) {	perror("failed shm_open");	assert(0);      }
       ftruncate(fd, size);
 
-      void * ptr =  mmap(NULL,size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+      void * ptr =  mmap(NULL,size, PROT_READ | PROT_WRITE, MAP_SHARED|fhugetlb, fd, 0);
       if ( ptr == MAP_FAILED ) {       perror("failed mmap");      assert(0);    }
       assert(((uint64_t)ptr&0x3F)==0);
       ShmCommBufs[r] =ptr;
+
+      if (fhugetlb) {
+	printf("USING HUGE PAGES FOR COMMS\n");
+	memset(ptr,0,size);
+      }
+
+      if (getenv("REPORT_PAGES_MAPPING"))
+	report_pages_for_pointer(ptr,size);
       
     }
   }

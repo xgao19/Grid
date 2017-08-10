@@ -201,6 +201,32 @@ public:
     }
   }
 
+
+// For the force term
+static void StapleMult(GaugeMat &staple, const GaugeLorentz &Umu, int mu) {
+    GridBase *grid = Umu._grid;
+    std::vector<GaugeMat> U(Nd, grid);
+    for (int d = 0; d < Nd; d++) {
+      // this operation is taking too much time
+      U[d] = PeekIndex<LorentzIndex>(Umu, d);
+    }
+    staple = zero;
+    GaugeMat tmp1(grid);
+    GaugeMat tmp2(grid);
+
+    for (int nu = 0; nu < Nd; nu++) {
+      if (nu != mu) {
+        // this is ~10% faster than the Staple
+        tmp1 = Cshift(U[nu], mu, 1);
+        tmp2 = Cshift(U[mu], nu, 1);
+        staple += tmp1* adj(U[nu]*tmp2);
+        tmp2 = adj(U[mu]*tmp1)*U[nu];
+        staple += Cshift(tmp2, nu, -1);
+      }
+    }
+    staple = U[mu]*staple;
+}
+
   //////////////////////////////////////////////////
   // the sum over all staples on each site
   //////////////////////////////////////////////////
@@ -213,7 +239,6 @@ public:
       U[d] = PeekIndex<LorentzIndex>(Umu, d);
     }
     staple = zero;
-    GaugeMat tmp(grid);
 
     for (int nu = 0; nu < Nd; nu++) {
 
@@ -227,7 +252,7 @@ public:
         //      |
         //    __|
         //
-
+     
         staple += Gimpl::ShiftStaple(
             Gimpl::CovShiftForward(
                 U[nu], nu,
@@ -240,6 +265,7 @@ public:
         // |__
         //
         //
+
         staple += Gimpl::ShiftStaple(
             Gimpl::CovShiftBackward(U[nu], nu,
                                     Gimpl::CovShiftBackward(U[mu], mu, U[nu])), mu);
@@ -302,8 +328,7 @@ public:
       //
       staple = Gimpl::ShiftStaple(
           Gimpl::CovShiftBackward(U[nu], nu,
-                                  Gimpl::CovShiftBackward(U[mu], mu, U[nu])),
-          mu);
+                                  Gimpl::CovShiftBackward(U[mu], mu, U[nu])), mu);
     }
   }
 
@@ -320,10 +345,10 @@ public:
       GaugeMat Vup(Umu._grid), Vdn(Umu._grid);
       StapleUpper(Vup, Umu, mu, nu);
       StapleLower(Vdn, Umu, mu, nu);
-      GaugeMat v = adj(Vup) - adj(Vdn);
+      GaugeMat v = Vup - Vdn;
       GaugeMat u = PeekIndex<LorentzIndex>(Umu, mu);  // some redundant copies
       GaugeMat vu = v*u;
-      FS = 0.25*Ta(u*v + Cshift(vu, mu, +1));
+      FS = 0.25*Ta(u*v + Cshift(vu, mu, -1));
   }
 
   static Real TopologicalCharge(GaugeLorentz &U){
@@ -343,8 +368,8 @@ public:
 
     double coeff = 8.0/(32.0*M_PI*M_PI);
 
-    LatticeComplex qfield = coeff*trace(Bx*Ex + By*Ey + Bz*Ez);
-    TComplex Tq = sum(qfield);
+    ComplexField qfield = coeff*trace(Bx*Ex + By*Ey + Bz*Ez);
+    auto Tq = sum(qfield);
     return TensorRemove(Tq).real();
   }
 
@@ -363,16 +388,16 @@ public:
                adj(Gimpl::CovShiftForward(
                    U[nu], nu, Gimpl::CovShiftForward(U[nu], nu, U[mu])));
   }
-  static void traceDirRectangle(LatticeComplex &rect,
+  static void traceDirRectangle(ComplexField &rect,
                                 const std::vector<GaugeMat> &U, const int mu,
                                 const int nu) {
     GaugeMat sp(U[0]._grid);
     dirRectangle(sp, U, mu, nu);
     rect = trace(sp);
   }
-  static void siteRectangle(LatticeComplex &Rect,
+  static void siteRectangle(ComplexField &Rect,
                             const std::vector<GaugeMat> &U) {
-    LatticeComplex siteRect(U[0]._grid);
+    ComplexField siteRect(U[0]._grid);
     Rect = zero;
     for (int mu = 1; mu < Nd; mu++) {
       for (int nu = 0; nu < mu; nu++) {
@@ -392,12 +417,12 @@ public:
       U[mu] = PeekIndex<LorentzIndex>(Umu, mu);
     }
 
-    LatticeComplex Rect(Umu._grid);
+    ComplexField Rect(Umu._grid);
 
     siteRectangle(Rect, U);
 
-    TComplex Tp = sum(Rect);
-    Complex p = TensorRemove(Tp);
+    auto Tp = sum(Rect);
+    auto p = TensorRemove(Tp);
     return p.real();
   }
   //////////////////////////////////////////////////

@@ -1858,6 +1858,7 @@ public:
     int Np;      // Np -- Number of spare vecs in kryloc space
     int Nm;      // Nm -- total number of vectors
 
+    int orth_period;
 
     RealD OrthoTime;
 
@@ -1878,7 +1879,7 @@ public:
 			       RealD _eresid, // resid in lmdue deficit 
 			       RealD _betastp, // if beta(k) < betastp: converged
 			       int _Niter, // Max iterations
-			       int _Nminres) :
+			       int _Nminres, int _orth_period = 1) :
       _HermOp(HermOp),
       _HermOpTest(HermOpTest),
       Nstop(_Nstop),
@@ -1887,7 +1888,8 @@ public:
       eresid(_eresid),
       betastp(_betastp),
       Niter(_Niter),
-      Nminres(_Nminres)
+	Nminres(_Nminres),
+	orth_period(_orth_period)
     { 
       Np = Nm-Nk; assert(Np>0);
     };
@@ -1900,7 +1902,8 @@ public:
 			       RealD _eresid, // resid in lmdue deficit 
 			       RealD _betastp, // if beta(k) < betastp: converged
 			       int _Niter, // Max iterations
-			       int _Nminres) : 
+			       int _Nminres,
+			       int _orth_period = 1) : 
       _HermOp(HermOp),
       _HermOpTest(HermOpTest),
       Nstop(_Nk),
@@ -1909,7 +1912,8 @@ public:
       eresid(_eresid),
       betastp(_betastp),
       Niter(_Niter),
-      Nminres(_Nminres)
+	Nminres(_Nminres),
+	orth_period(_orth_period)
     { 
       Np = Nm-Nk; assert(Np>0);
     };
@@ -1961,7 +1965,7 @@ public:
       lme[k]  = beta;
 
       gsw_o.Start();
-      if (k>0) { 
+      if (k>0 && k % orth_period == 0) { 
 	orthogonalize(w,evec,k); // orthonormalise
       }
       gsw_o.Stop();

@@ -232,6 +232,123 @@ public:
 
     }
 
+
+
+
+    template<class T>
+      void vcaxpy2(iScalar<T>& r,
+		   const vCoeff_t& a1,const iScalar<T>& x1,
+		   const vCoeff_t& a2,const iScalar<T>& x2,
+		   const iScalar<T>& y) {
+      vcaxpy2(r._internal,
+	      a1,x1._internal,
+	      a2,x2._internal,
+	      y._internal);
+    }
+
+    template<class T,int N>
+      void vcaxpy2(iVector<T,N>& r,
+		   const vCoeff_t& a1,const iVector<T,N>& x1,
+		   const vCoeff_t& a2,const iVector<T,N>& x2,
+		   const iVector<T,N>& y) {
+      for (int i=0;i<N;i++)
+	vcaxpy2(r._internal[i],
+		a1,x1._internal[i],
+		a2,x2._internal[i],
+		y._internal[i]);
+    }
+
+    void vcaxpy2(vCoeff_t& r,
+		 const vCoeff_t& a1,const vCoeff_t& x1,
+		 const vCoeff_t& a2,const vCoeff_t& x2,
+		 const vCoeff_t& y) {
+      r = a1*x1 + a2*x2 + y;
+    }
+
+    void block_caxpy2(int b, Field& ret, 
+		      const vCoeff_t& a1, const Field& x1, 
+		      const vCoeff_t& a2, const Field& x2, 
+		      const Field& y) {
+
+      std::vector<int> x0;
+      block_to_coor(b,x0);
+
+      for (int i=0;i<_block_sites;i++) { // only odd sites
+	int ss = block_site_to_o_site(x0,i);
+	vcaxpy2(ret._odata[ss],a1,x1._odata[ss],a2,x2._odata[ss],y._odata[ss]);
+      }
+
+    }
+
+
+
+
+    template<class T>
+      void vcaxpy4(iScalar<T>& r,
+		   const vCoeff_t& a1,const iScalar<T>& x1,
+		   const vCoeff_t& a2,const iScalar<T>& x2,
+		   const vCoeff_t& a3,const iScalar<T>& x3,
+		   const vCoeff_t& a4,const iScalar<T>& x4,
+		   const iScalar<T>& y) {
+      vcaxpy4(r._internal,
+	      a1,x1._internal,
+	      a2,x2._internal,
+	      a3,x3._internal,
+	      a4,x4._internal,
+	      y._internal);
+    }
+
+    template<class T,int N>
+      void vcaxpy4(iVector<T,N>& r,
+		   const vCoeff_t& a1,const iVector<T,N>& x1,
+		   const vCoeff_t& a2,const iVector<T,N>& x2,
+		   const vCoeff_t& a3,const iVector<T,N>& x3,
+		   const vCoeff_t& a4,const iVector<T,N>& x4,
+		   const iVector<T,N>& y) {
+      for (int i=0;i<N;i++)
+	vcaxpy4(r._internal[i],
+		a1,x1._internal[i],
+		a2,x2._internal[i],
+		a3,x3._internal[i],
+		a4,x4._internal[i],
+		y._internal[i]);
+    }
+
+    void vcaxpy4(vCoeff_t& r,
+		 const vCoeff_t& a1,const vCoeff_t& x1,
+		 const vCoeff_t& a2,const vCoeff_t& x2,
+		 const vCoeff_t& a3,const vCoeff_t& x3,
+		 const vCoeff_t& a4,const vCoeff_t& x4,
+		 const vCoeff_t& y) {
+      r = a1*x1 + a2*x2 + a3*x3 + a4*x4 + y;
+    }
+
+    void block_caxpy4(int b, Field& ret, 
+		      const vCoeff_t& a1, const Field& x1, 
+		      const vCoeff_t& a2, const Field& x2, 
+		      const vCoeff_t& a3, const Field& x3, 
+		      const vCoeff_t& a4, const Field& x4, 
+		      const Field& y) {
+
+      std::vector<int> x0;
+      block_to_coor(b,x0);
+
+      for (int i=0;i<_block_sites;i++) { // only odd sites
+	int ss = block_site_to_o_site(x0,i);
+	vcaxpy4(ret._odata[ss],
+		a1,x1._odata[ss],
+		a2,x2._odata[ss],
+		a3,x3._odata[ss],
+		a4,x4._odata[ss],
+		y._odata[ss]);
+      }
+
+    }
+
+
+
+
+
     void block_caxpy(int b, std::vector< ComplexD >& ret, const vCoeff_t& a, const Field& x, const std::vector< ComplexD >& y) {
       std::vector<int> x0;
       block_to_coor(b,x0);
@@ -494,10 +611,12 @@ class BasisFieldVector {
   }
 
   void orthogonalize(Field& w, int k) {
+
     for(int j=0; j<k; ++j){
       Coeff_t ip = (Coeff_t)innerProduct(_v[j],w);
       w = w - ip*_v[j];
     }
+
   }
 
   void rotate(DenseVector<RealD>& Qt,int j0, int j1, int k0,int k1,int Nm) {
@@ -690,12 +809,25 @@ public:
 
     int Nbasis = sizeof(in._odata[0]._internal._internal) / sizeof(in._odata[0]._internal._internal[0]);
     assert(Nbasis == _evec._Nm);
-    
+
 #pragma omp parallel for
     for (int b=0;b<_bgrid._o_blocks;b++) {
-      for (int j=0;j<_evec._Nm;j++) {
+
+      int nw = _evec._Nm / 4;
+
+      for (int j=0;j<4*nw;j+=4) {
+	_bgrid.block_caxpy4(b,out,
+			    in._odata[b]._internal._internal[j+0],_evec._v[j+0],
+			    in._odata[b]._internal._internal[j+1],_evec._v[j+1],
+			    in._odata[b]._internal._internal[j+2],_evec._v[j+2],
+			    in._odata[b]._internal._internal[j+3],_evec._v[j+3],
+			    out);
+      }
+
+      for (int j=4*nw;j<_evec._Nm;j++) {
 	_bgrid.block_caxpy(b,out,in._odata[b]._internal._internal[j],_evec._v[j],out);
       }
+
     }
 
   }
@@ -712,6 +844,8 @@ public:
     Field tmp(_bgrid._grid);
     tmp = in;
     
+    GridStopWatch gsw;
+    gsw.Start();
 #pragma omp parallel for
     for (int b=0;b<_bgrid._o_blocks;b++) {
       for (int j=0;j<_evec._Nm;j++) {
@@ -721,6 +855,9 @@ public:
 	out._odata[b]._internal._internal[j] = c;
       }
     }
+    gsw.Stop();
+
+    std::cout<<GridLogMessage<< "Timing fineToCoarse: " << gsw.Elapsed() << std::endl;
 
   }
 
@@ -1838,11 +1975,39 @@ public:
    
  }
 
+
+ void memreport(GridBase* grid,const char* tag) {
+   grid->Barrier();
+
+   if (grid->IsBoss()) {
+     printf("MEMREPORT[%s]\n",tag);
+     char buf[256];
+     sprintf(buf,"cat /proc/%d/status | grep Vm",(int)getpid());
+     system(buf);
+   }
+
+   grid->Barrier();
+ }
+
 /////////////////////////////////////////////////////////////
 // Implicitly restarted lanczos
 /////////////////////////////////////////////////////////////
+ class CheckpointerNone {
+ public:
+   CheckpointerNone() {
+   }
 
- template<class Field> 
+   template<typename T> 
+     bool load(T& v) {
+     return false;
+   }
+
+   template<typename T>
+     void save(const T& v) {
+   }
+ };
+
+ template<class Field, typename Checkpointer> 
     class ImplicitlyRestartedLanczos {
 
     const RealD small = 1.0e-16;
@@ -1858,6 +2023,9 @@ public:
     int Np;      // Np -- Number of spare vecs in kryloc space
     int Nm;      // Nm -- total number of vectors
 
+    int orth_period;
+
+    Checkpointer& ckpt;
 
     RealD OrthoTime;
 
@@ -1869,7 +2037,7 @@ public:
     // Constructor
     /////////////////////////
 
-    ImplicitlyRestartedLanczos(
+    ImplicitlyRestartedLanczos(Checkpointer& _ckpt,
 			       LinearFunction<Field> & HermOp,
 			       LinearFunction<Field> & HermOpTest,
 			       int _Nstop, // sought vecs
@@ -1878,7 +2046,8 @@ public:
 			       RealD _eresid, // resid in lmdue deficit 
 			       RealD _betastp, // if beta(k) < betastp: converged
 			       int _Niter, // Max iterations
-			       int _Nminres) :
+			       int _Nminres, int _orth_period = 1) :
+      ckpt(_ckpt),
       _HermOp(HermOp),
       _HermOpTest(HermOpTest),
       Nstop(_Nstop),
@@ -1887,33 +2056,11 @@ public:
       eresid(_eresid),
       betastp(_betastp),
       Niter(_Niter),
-      Nminres(_Nminres)
+	Nminres(_Nminres),
+	orth_period(_orth_period)
     { 
       Np = Nm-Nk; assert(Np>0);
     };
-
-    ImplicitlyRestartedLanczos(
-			       LinearFunction<Field> & HermOp,
-			       LinearFunction<Field> & HermOpTest,
-			       int _Nk, // sought vecs
-			       int _Nm, // spare vecs
-			       RealD _eresid, // resid in lmdue deficit 
-			       RealD _betastp, // if beta(k) < betastp: converged
-			       int _Niter, // Max iterations
-			       int _Nminres) : 
-      _HermOp(HermOp),
-      _HermOpTest(HermOpTest),
-      Nstop(_Nk),
-      Nk(_Nk),
-      Nm(_Nm),
-      eresid(_eresid),
-      betastp(_betastp),
-      Niter(_Niter),
-      Nminres(_Nminres)
-    { 
-      Np = Nm-Nk; assert(Np>0);
-    };
-
 
 /* Saad PP. 195
 1. Choose an initial vector v1 of 2-norm unity. Set β1 ≡ 0, v0 ≡ 0
@@ -1933,45 +2080,57 @@ public:
       assert( k< Nm );
 
       GridStopWatch gsw_op,gsw_o;
+      RealD alph, beta;
 
       Field& evec_k = evec[k];
 
-      gsw_op.Start();
-      _HermOp(evec_k,w);
-      gsw_op.Stop();
+      if (!ckpt.load(w) || !ckpt.load(alph) || !ckpt.load(beta)) {
 
-      if(k>0){
-	w -= lme[k-1] * evec[k-1];
-      }    
+	gsw_op.Start();
+	_HermOp(evec_k,w);
+	gsw_op.Stop();
 
-      ComplexD zalph = innerProduct(evec_k,w); // 4. αk:=(wk,vk)
-      RealD     alph = real(zalph);
+	if(k>0){
+	  w -= lme[k-1] * evec[k-1];
+	}    
 
-      w = w - alph * evec_k;// 5. wk:=wk−αkvk
+	ComplexD zalph = innerProduct(evec_k,w); // 4. αk:=(wk,vk)
+	alph = real(zalph);
 
-      RealD beta = normalise(w); // 6. βk+1 := ∥wk∥2. If βk+1 = 0 then Stop
+	w = w - alph * evec_k;// 5. wk:=wk−αkvk
+
+	beta = normalise(w); // 6. βk+1 := ∥wk∥2. If βk+1 = 0 then Stop
                                  // 7. vk+1 := wk/βk+1
 
-      std::cout<<GridLogMessage << "alpha[" << k << "] = " << zalph << " beta[" << k << "] = "<<beta<<std::endl;
-      const RealD tiny = 1.0e-20;
-      if ( beta < tiny ) { 
-	std::cout<<GridLogMessage << " beta is tiny "<<beta<<std::endl;
-     }
+	std::cout<<GridLogMessage << "alpha[" << k << "] = " << zalph << " beta[" << k << "] = "<<beta<<std::endl;
+	const RealD tiny = 1.0e-20;
+	if ( beta < tiny ) { 
+	  std::cout<<GridLogMessage << " beta is tiny "<<beta<<std::endl;
+	}
+
+	gsw_o.Start();
+	if (k>0 && k % orth_period == 0) { 
+	  orthogonalize(w,evec,k); // orthonormalise
+	}
+	gsw_o.Stop();
+
+	std::cout << GridLogMessage << "Timing: operator=" << gsw_op.Elapsed() <<
+	  " orth=" << gsw_o.Elapsed() << std::endl;
+
+	ckpt.save(w);
+	ckpt.save(alph);
+	ckpt.save(beta);
+      } else {
+	std::cout<<GridLogMessage << "CKPT:  alpha[" << k << "] = " << alph << " beta[" << k << "] = "<<beta<<std::endl;
+      }
+
+      // update state
       lmd[k] = alph;
       lme[k]  = beta;
-
-      gsw_o.Start();
-      if (k>0) { 
-	orthogonalize(w,evec,k); // orthonormalise
-      }
-      gsw_o.Stop();
 
       if(k < Nm-1) { 
 	evec[k+1] = w;
       }
-
-      std::cout << GridLogMessage << "Timing: operator=" << gsw_op.Elapsed() <<
-	" orth=" << gsw_o.Elapsed() << std::endl;
 
     }
 

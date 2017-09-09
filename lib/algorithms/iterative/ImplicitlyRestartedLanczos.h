@@ -205,6 +205,36 @@ public:
 
     }
 
+
+    // vector - lane operations sometimes needed for non-performance-critical code
+    template<class T>
+      void vcaxpy_lane(int l, iScalar<T>& r,const vCoeff_t& a,const iScalar<T>& x,const iScalar<T>& y) {
+      vcaxpy_lane(l,r._internal,a,x._internal,y._internal);
+    }
+
+    template<class T,int N>
+      void vcaxpy_lane(int l, iVector<T,N>& r,const vCoeff_t& a,const iVector<T,N>& x,const iVector<T,N>& y) {
+      for (int i=0;i<N;i++)
+	vcaxpy_lane(l,r._internal[i],a,x._internal[i],y._internal[i]);
+    }
+
+    void vcaxpy_lane(int l, vCoeff_t& r,const vCoeff_t& a,const vCoeff_t& x,const vCoeff_t& y) {
+      ((Coeff_t*)&r)[l] = ((Coeff_t*)&a)[l]*((Coeff_t*)&x)[l] + ((Coeff_t*)&y)[l];
+    }
+
+    void block_lane_caxpy(int b, int l, Field& ret, const vCoeff_t& a, const Field& x, const Field& y) {
+
+      std::vector<int> x0;
+      block_to_coor(b,x0);
+
+      for (int i=0;i<_block_sites;i++) { // only odd sites
+	int ss = block_site_to_o_site(x0,i);
+	vcaxpy_lane(l,ret._odata[ss],a,x._odata[ss],y._odata[ss]);
+      }
+
+    }
+
+
     template<class T>
       void vcaxpy(iScalar<T>& r,const vCoeff_t& a,const iScalar<T>& x,const iScalar<T>& y) {
       vcaxpy(r._internal,a,x._internal,y._internal);
@@ -626,18 +656,40 @@ class BasisFieldVector {
 #pragma omp parallel
     {
       std::vector < vobj > B(Nm);
-      
-#pragma omp for
+      int isBoss = omp_get_thread_num() == 0;
+
       for(int ss=0;ss < grid->oSites();ss++){
 	for(int j=j0; j<j1; ++j) B[j]=0.;
-	
+
+	if (isBoss)
+	  std::cout << GridLogMessage << "Start rotation " << ss << " / " << grid->oSites() << std::endl;
+
+	GridStopWatch gsw;
+	gsw.Start();
+
 	for(int j=j0; j<j1; ++j){
+#pragma omp for
 	  for(int k=k0; k<k1; ++k){
 	    B[j] +=Qt[k+Nm*j] * _v[k]._odata[ss];
 	  }
 	}
-	for(int j=j0; j<j1; ++j){
-	  _v[j]._odata[ss] = B[j];
+	gsw.Stop();
+
+	if (isBoss)
+	  std::cout << GridLogMessage << "rotate timing " << ss << " / " << grid->oSites() << " took " << gsw.Elapsed() << std::endl;
+	
+#pragma omp single
+	{
+	  for(int j=j0; j<j1; ++j){
+	  _v[j]._odata[ss] = 0.;
+	  }
+	}
+
+#pragma omp critical
+	{
+	  for(int j=j0; j<j1; ++j){
+	  _v[j]._odata[ss] += B[j];
+	  }
 	}
       }
     }
@@ -746,13 +798,72 @@ template<typename Field>
 class BlockProjector {
 public:
 
+  typedef typename Field::scalar_type Coeff_t;
+  typedef typename Field::vector_type vCoeff_t;
+
   BasisFieldVector<Field>& _evec;
   BlockedGrid<Field>& _bgrid;
 
   BlockProjector(BasisFieldVector<Field>& evec, BlockedGrid<Field>& bgrid) : _evec(evec), _bgrid(bgrid) {
   }
 
-  void createOrthonormalBasis(RealD thres = 0.0) {
+  void removeZeroBlocks(RealD thres = 1e-7) {
+    GridStopWatch sw;
+    sw.Start();
+
+    constexpr int nsimd = sizeof(vCoeff_t) / sizeof(Coeff_t);
+
+    int cnt = 0;
+
+    Field tmpzero(_evec._v[0]._grid);
+    tmpzero = zero;
+
+#pragma omp parallel
+    {
+      int lcnt = 0;
+
+#pragma omp for
+      for (int b=0;b<_bgrid._o_blocks;b++) {
+
+	for (int l=0;l<nsimd;l++) {
+
+	  int j=0;
+	  for (int i=0;i<_evec._Nm;i++) {
+	  
+	    // i == source, j == dest
+	    auto nrm0 = _bgrid.block_sp(b,_evec._v[i],_evec._v[i]);
+	    Coeff_t* n = (Coeff_t*)&nrm0;
+
+	    if (n[l].real() > thres) {
+	      // v[j] = v[i]
+	      if (i!=j)
+		_bgrid.block_lane_caxpy(b,l,_evec._v[j],1.0,_evec._v[i],tmpzero);
+	      
+	      j++;
+	    } else {
+	      lcnt++;
+	    }
+	  }
+	  
+	  // now set blocks from j to Nm to zero
+	  for (int i=j;i<_evec._Nm;i++)
+	    _bgrid.block_lane_caxpy(b,l,_evec._v[i],0.0,tmpzero,tmpzero);	
+	}
+      }
+
+#pragma omp critical
+      {
+	cnt += lcnt;
+      }
+    }
+    sw.Stop();
+    std::cout << GridLogMessage << "Removed zero blocks in " << sw.Elapsed() << " (" << ((RealD)cnt / (RealD)_bgrid._blocks / (RealD)_evec._Nm) 
+	      << " below threshold)" << std::endl;
+  }
+
+  void createOrthonormalBasis(RealD thres = 0.0, int nMaxSetTinyZero = 0) {
+
+    constexpr int nsimd = sizeof(vCoeff_t) / sizeof(Coeff_t);
 
     GridStopWatch sw;
     sw.Start();
@@ -766,6 +877,8 @@ public:
 #pragma omp for
       for (int b=0;b<_bgrid._o_blocks;b++) {
 	
+	std::vector<int> vnSetTinyZero(nsimd,nMaxSetTinyZero);
+
 	for (int i=0;i<_evec._Nm;i++) {
 	  
 	  auto nrm0 = _bgrid.block_sp(b,_evec._v[i],_evec._v[i]);
@@ -778,13 +891,23 @@ public:
 	  auto nrm = _bgrid.block_sp(b,_evec._v[i],_evec._v[i]);
 	  
 	  auto eps = nrm/nrm0;
-	  if (Reduce(eps).real() < thres) {
-	    lcnt++;
+	  auto scl = 1.0 / sqrt(nrm);
+
+	  if (nMaxSetTinyZero) {
+	    // the following needs to be done on inner Grid
+	    Coeff_t* s = (Coeff_t*)&scl;
+	    Coeff_t* e = (Coeff_t*)&eps;
+	    for (int l=0;l<nsimd;l++) {
+	      if (e[l].real() < thres) {
+		lcnt++;
+		if (vnSetTinyZero[l]) {
+		  s[l] = 0.0;
+		  vnSetTinyZero[l]--;
+		}
+	      }
+	    }
 	  }
-	  
-	  // TODO: if norm is too small, remove this eigenvector/mark as not needed; in practice: set it to zero norm here and return a mask
-	  // that is then used later to decide not to write certain eigenvectors to disk (add a norm calculation before subtraction step and look at nrm/nrm0 < eps to decide)
-	  _bgrid.block_cscale(b,1.0 / sqrt(nrm),_evec._v[i]);
+	  _bgrid.block_cscale(b,scl,_evec._v[i]);
 	  
 	}
 	
@@ -796,7 +919,7 @@ public:
       }
     }
     sw.Stop();
-    std::cout << GridLogMessage << "Gram-Schmidt to create blocked basis took " << sw.Elapsed() << " (" << ((RealD)cnt / (RealD)_bgrid._o_blocks / (RealD)_evec._Nm) 
+    std::cout << GridLogMessage << "Gram-Schmidt to create blocked basis took " << sw.Elapsed() << " (" << ((RealD)cnt / (RealD)_bgrid._blocks / (RealD)_evec._Nm) 
 	      << " below threshold)" << std::endl;
 
   }

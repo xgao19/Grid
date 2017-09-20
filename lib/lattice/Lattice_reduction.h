@@ -138,7 +138,7 @@ inline typename vobj::scalar_object sum(const Lattice<vobj> &arg)
 // sliceSum, sliceInnerProduct, sliceAxpy, sliceNorm etc...
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<class vobj> inline void sliceSum(const Lattice<vobj> &Data,std::vector<typename vobj::scalar_object> &result,int orthogdim)
+template<class vobj> inline void sliceSumNodeLocal(const Lattice<vobj> &Data,std::vector<typename vobj::scalar_object> &result,int orthogdim)
 {
   ///////////////////////////////////////////////////////
   // FIXME precision promoted summation
@@ -215,10 +215,19 @@ template<class vobj> inline void sliceSum(const Lattice<vobj> &Data,std::vector<
       gsum=zero;
     }
 
-    grid->GlobalSum(gsum);
+    //grid->GlobalSum(gsum);
 
     result[t]=gsum;
   }
+}
+
+
+template<class vobj> inline void sliceSum(const Lattice<vobj> &Data,std::vector<typename vobj::scalar_object> &result,int orthogdim)
+{
+  GridBase  *grid = Data._grid;
+  assert(grid!=NULL);
+  sliceSumNodeLocal(Data,result,orthogdim);
+  grid->GlobalSum(result);
 }
 
 template<class vobj>

@@ -176,6 +176,13 @@ class CartesianCommunicator {
   void GlobalSum(ComplexD &c);
   void GlobalSumVector(ComplexD *c,int N);
   
+  template<class obj> void GlobalSum(std::vector<obj> &o){
+    typedef typename obj::scalar_type scalar_type;
+    int words = sizeof(obj)/sizeof(scalar_type);
+    scalar_type * ptr = (scalar_type *)& o[0];
+    GlobalSumVector(ptr,words*o.size());
+  }
+
   template<class obj> void GlobalSum(obj &o){
     typedef typename obj::scalar_type scalar_type;
     int words = sizeof(obj)/sizeof(scalar_type);

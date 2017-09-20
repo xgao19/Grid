@@ -716,6 +716,14 @@ class BasisFieldVector {
 
   std::vector<int> getIndex(DenseVector<RealD>& sort_vals) {
 
+    //0 1 1.5 0.5
+    //0 1 2 3
+
+    // ->
+
+    //0 0.5 1 1.5
+    //0 3 1 2
+
     std::vector<int> idx(sort_vals.size());
     iota(idx.begin(), idx.end(), 0);
 
@@ -727,6 +735,9 @@ class BasisFieldVector {
   }
 
   void reorderInPlace(DenseVector<RealD>& sort_vals, std::vector<int>& idx) {
+
+    //dest[i] = src[idx[i]]
+
     GridStopWatch gsw;
     gsw.Start();
 
@@ -953,6 +964,7 @@ public:
 
     }
 
+    //std::cout << GridLogMessage << "Check cTF norm2(in) = " << norm2(in) << " norm2(out) = " << norm2(out) << std::endl;
   }
 
   template<typename CoarseField>
@@ -981,7 +993,7 @@ public:
     gsw.Stop();
 
     std::cout<<GridLogMessage<< "Timing fineToCoarse: " << gsw.Elapsed() << std::endl;
-
+    //std::cout << GridLogMessage << "Check fTC norm2(in) = " << norm2(in) << " norm2(out) = " << norm2(out) << std::endl;
   }
 
   template<typename CoarseField>
@@ -1000,7 +1012,12 @@ public:
     CoarseField result_coarse = src_coarse;
     result_coarse = zero;
     fineToCoarse(src_orig,src_coarse);
+
+    //std::cout << GridLogMessage << "N: " << N << std::endl;
+    //std::cout << GridLogMessage << "Eval: " << eval << std::endl;
+
     for (int i=0;i<N;i++) {
+      //std::cout << GridLogMessage << "norm2(v[i]) = " << norm2(_coef._v[i]) << std::endl;
       axpy(result_coarse,TensorRemove(innerProduct(_coef._v[i],src_coarse)) / eval[i],_coef._v[i],result_coarse);
     }
     coarseToFine(result_coarse,result);
@@ -2099,7 +2116,7 @@ public:
  }
 
 
- void memreport(GridBase* grid,const char* tag) {
+static  void memreport(GridBase* grid,const char* tag) {
    grid->Barrier();
 
    if (grid->IsBoss()) {

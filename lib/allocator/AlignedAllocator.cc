@@ -5,13 +5,13 @@
 
 namespace Grid {
 
-int PointerCache::victim;
+int PointerCache::victim = 0;
 
   PointerCache::PointerCacheEntry PointerCache::Entries[PointerCache::Ncache];
 
 void *PointerCache::Insert(void *ptr,size_t bytes) {
 
-  if (bytes < 4096 ) return NULL;
+  if (bytes < 4096 ) return ptr;
 
 #ifdef GRID_OMP
   assert(omp_in_parallel()==0);

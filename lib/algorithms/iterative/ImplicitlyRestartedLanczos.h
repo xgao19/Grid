@@ -632,6 +632,9 @@ class BasisFieldVector {
   BasisFieldVector(int Nm,GridBase* value) : _Nm(Nm), _v(Nm,value) {
     report(Nm,value);
   }
+
+  BasisFieldVector() : _Nm(0) {
+  }
   
   ~BasisFieldVector() {
   }
@@ -700,21 +703,29 @@ class BasisFieldVector {
     return _Nm;
   }
 
-  void resize(int n) {
+  void resize(int n, GridBase* value) {
     if (n > _Nm)
       _v.reserve(n);
     
-    _v.resize(n,_v[0]._grid);
+    _v.resize(n,value);
 
     if (n < _Nm)
       _v.shrink_to_fit();
 
-    report(n - _Nm,_v[0]._grid);
+    report(n - _Nm,value);
 
-    _Nm = n;
+    _Nm = n;    
   }
 
-  std::vector<int> getIndex(DenseVector<RealD>& sort_vals) {
+  void resize(int n) {
+    assert(_v.size() > 0);
+    resize(n,_v[0]._grid);
+  }
+
+  std::vector<int> getIndex(DenseVector<RealD>& sort_vals, int MaxTouch = 0, bool breverse = false) {
+
+    if (!MaxTouch)
+      MaxTouch = (int)sort_vals.size();
 
     //0 1 1.5 0.5
     //0 1 2 3
@@ -728,8 +739,11 @@ class BasisFieldVector {
     iota(idx.begin(), idx.end(), 0);
 
     // sort indexes based on comparing values in v
-    sort(idx.begin(), idx.end(),
+    sort(idx.begin(), idx.begin() + MaxTouch,
 	 [&sort_vals](int i1, int i2) {return ::fabs(sort_vals[i1]) < ::fabs(sort_vals[i2]);});
+
+    if (breverse)
+      std::reverse(idx.begin(), idx.begin() + MaxTouch);
 
     return idx;
   }
@@ -772,13 +786,17 @@ class BasisFieldVector {
     // sort values
     gsw.Stop();
     std::cout << GridLogMessage << "Sorted eigenspace in place in " << gsw.Elapsed() << " using " << nswaps << " swaps" << std::endl;
+
+    //std::cout << "Dump current order:" << std::endl;
+    //for (size_t i=0;i<idx.size();i++) {
+    //  std::cout << " val[" << i << "] = " << sort_vals[i] << std::endl;
+    //}
+
   }
 
-  void sortInPlace(DenseVector<RealD>& sort_vals, bool reverse) {
+  void sortInPlace(DenseVector<RealD>& sort_vals, bool reverse, int MaxTouch = 0) {
 
-    std::vector<int> idx = getIndex(sort_vals);
-    if (reverse)
-      std::reverse(idx.begin(), idx.end());
+    std::vector<int> idx = getIndex(sort_vals,MaxTouch,reverse);
 
     reorderInPlace(sort_vals,idx);
 
@@ -1138,6 +1156,7 @@ public:
      int nperdir = ntotal / 32;
      if (nperdir < 1)
        nperdir=1;
+
      std::cout << GridLogMessage << " Read " << dir << " nodes = " << cnodes << std::endl;
      std::cout << GridLogMessage << " lvol = " << lvol << std::endl;
      
@@ -1145,29 +1164,50 @@ public:
      char hostname[1024];
      gethostname(hostname, 1024);
 
+     char buf[4096];
+     std::vector<uint32_t> crc_exp_all(ntotal);
+
+     _grid->Barrier();
+     sprintf(buf,"%s/checksums.txt",dir);
+     FILE* f;
+     if (_grid->IsBoss()) {
+       f = fopen(buf,"rt");
+       if (!f) {
+	 fprintf(stderr,"Node %s cannot read %s\n",hostname,buf); fflush(stderr);
+	 exit(2);
+       }
+
+       for (int l=0;l<2;l++)
+	 fgets(buf,sizeof(buf),f);
+
+       for (int l=0;l<ntotal;l++) {
+	 fgets(buf,sizeof(buf),f);
+	 crc_exp_all[l] = strtol(buf, NULL, 16);
+       }
+
+       fclose(f);
+     } else {
+       for (int l=0;l<ntotal;l++)
+	 crc_exp_all[l] = 0x0;
+     }
+
+     {
+       for (int l=0;l<ntotal;l++)
+	 _grid->GlobalSum(crc_exp_all[l]);
+     }
+
+
      // now load one slot at a time and fill the vector
      for (auto sl=slots.begin();sl!=slots.end();sl++) {
        std::vector<int>& idx = sl->second;
        int slot = sl->first;
        std::vector<float> rdata;
        
-       char buf[4096];
-       
-       sprintf(buf,"%s/checksums.txt",dir);
-       FILE* f = fopen(buf,"rt");
-       if (!f) {
-	 fprintf(stderr,"Node %s cannot read %s\n",hostname,buf); fflush(stderr);
-	 return false;
-       }
-       
-       for (int l=0;l<3+slot;l++)
-	 fgets(buf,sizeof(buf),f);
-       uint32_t crc_exp = strtol(buf, NULL, 16);
-       fclose(f);
-       
+       uint32_t crc_exp = crc_exp_all[slot];
+
        // load one slot vector
        sprintf(buf,"%s/%2.2d/%10.10d",dir,slot/nperdir,slot);
-       f = fopen(buf,"rb");
+       FILE* f = fopen(buf,"rb");
        if (!f) {
 	 fprintf(stderr,"Node %s cannot read %s\n",hostname,buf); fflush(stderr);
 	 return false;
@@ -1265,22 +1305,35 @@ public:
 
      GridBase* _grid = ret._v[0]._grid;
 
+     std::vector<int> nodes((int)_grid->_processors.size());
+
      char buf[4096];
      sprintf(buf,"%s/nodes.txt",dir);
-     FILE* f = fopen(buf,"rt");
-     if (!f) {
-       if (_grid->IsBoss()) {
-	 fprintf(stderr,"Attempting to load eigenvectors without secifying node layout failed due to absence of nodes.txt\n");
-	 fflush(stderr);
-       }
-       return false;
+
+     // check 
+     {
+       struct stat sb;
+       if (stat(dir, &sb) || !S_ISDIR(sb.st_mode))
+	 return false;
      }
 
+     if (_grid->IsBoss()) {
+       FILE* f = fopen(buf,"rt");
+       if (!f) {
+	 fprintf(stderr,"Attempting to load eigenvectors without secifying node layout failed due to absence of nodes.txt\n");
+	 exit(1);
+       }
 
-     std::vector<int> nodes((int)_grid->_processors.size());
+       for (int i =0;i<(int)_grid->_processors.size();i++)
+	 assert(fscanf(f,"%d\n",&nodes[i])==1);
+       fclose(f);
+     } else {
+       for (int i =0;i<(int)_grid->_processors.size();i++)
+	 nodes[i] = 0;
+     }
+
      for (int i =0;i<(int)_grid->_processors.size();i++)
-       assert(fscanf(f,"%d\n",&nodes[i])==1);
-     fclose(f);
+       _grid->GlobalSum(*(uint32_t*)&nodes[i]);
 
      return read_argonne(ret,dir,nodes);
    }
@@ -1987,19 +2040,22 @@ public:
        _l[i] /= _grid->_processors[i];
 
      char buf[4096];
-     
-     if (_grid->IsBoss()) {
-       mkdir(dir,ACCESSPERMS);
-       
-       for (int i=0;i<32;i++) {
-	 sprintf(buf,"%s/%2.2d",dir,i);
-	 mkdir(buf,ACCESSPERMS);
-       }
-     }
-     
-     _grid->Barrier(); // make sure directories are ready
 
-     
+     // make sure all directories are ready on all the nodes in case we write to local scratch
+     for (int no=0;no<_grid->_Nprocessors;no++) {
+       if (no == _grid->ThisRank()) {
+
+	 mkdir(dir,ACCESSPERMS);
+       
+	 for (int i=0;i<32;i++) {
+	   sprintf(buf,"%s/%2.2d",dir,i);
+	   mkdir(buf,ACCESSPERMS);
+	 }
+       }
+
+       _grid->Barrier(); // make sure directories are ready
+     }
+          
      int nperdir = _grid->_Nprocessors / 32;
      if (nperdir < 1)
        nperdir=1;
@@ -2817,7 +2873,7 @@ until convergence
 	  eval = eval2_copy;
 	}
 
-	evec.sortInPlace(eval,reverse);
+	evec.sortInPlace(eval,reverse,Nstop);
 
 	{
 	  

@@ -67,6 +67,20 @@ namespace Grid {
     virtual void MooeeInv(const FermionField &in, FermionField &out) ;
     virtual void MooeeInvDag(const FermionField &in, FermionField &out) ;
 
+    RealD M(const FermionField &in, FermionField &out) {
+      out.checkerboard = in.checkerboard;
+      Dhop(in, out, DaggerNo);
+      FermionField tmp(out._grid);
+      axpibg5x(tmp,in,4. + this->mass,this->mu);
+      return axpy_norm(out, 1.0, tmp, out);
+    }
+
+    // needed for fast PV
+    void update(RealD& _mass, RealD& _mu) {
+      this->mass = _mass;
+      this->mu = _mu;
+    }
+
   private:
      RealD mu; // TwistedMass parameter
 

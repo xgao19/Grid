@@ -15,8 +15,11 @@ class Smear_Stout : public Smear<Gimpl> {
   const Smear<Gimpl>* SmearBase;
 
  public:
-  INHERIT_GIMPL_TYPES(Gimpl)
+  INHERIT_GIMPL_TYPES(Gimpl);
 
+  typedef Lattice<iSinglet<typename GaugeLinkField::vector_type > > LatticeComplex;
+  typedef typename GaugeLinkField::scalar_type Complex;
+  
   Smear_Stout(Smear<Gimpl>* base) : SmearBase(base) {
     assert(Nc == 3);//                  "Stout smearing currently implemented only for Nc==3");
   }

@@ -67,6 +67,12 @@ namespace Grid {
 ////////////////////////////////////////////////////////////////////
 // A lattice of something, but assume the something is SIMDized.
 ////////////////////////////////////////////////////////////////////
+#ifdef USE_GPT_ALLOC
+  namespace GPT {
+    void* Alloc(size_t n, size_t sizeElement);
+    bool Dealloc(void* p, size_t n, size_t sizeElement);
+  };
+#endif
 
 template<typename _Tp>
 class alignedAllocator {
@@ -91,6 +97,12 @@ public:
   { 
     size_type bytes = __n*sizeof(_Tp);
 
+#ifdef USE_GPT_ALLOC
+    _Tp *qp; 
+    if (qp = (_Tp *) GPT::Alloc(__n,sizeof(_Tp)))
+      return qp;
+#endif
+
     _Tp *ptr = (_Tp *) PointerCache::Lookup(bytes);
     
 #ifdef HAVE_MM_MALLOC_H
@@ -103,6 +115,12 @@ public:
   }
 
   void deallocate(pointer __p, size_type __n) { 
+
+#ifdef USE_GPT_ALLOC
+    if (GPT::Dealloc(__p,__n,sizeof(_Tp)))
+      return;
+#endif
+
     size_type bytes = __n * sizeof(_Tp);
     pointer __freeme = (pointer)PointerCache::Insert((void *)__p,bytes);
 

@@ -599,7 +599,7 @@ public:
 
 
 
-template<class Field>
+ template<class Field, class Allocator = std::allocator<Field> >
 class BasisFieldVector {
  public:
   int _Nm;
@@ -609,7 +609,7 @@ class BasisFieldVector {
   typedef typename Field::vector_object vobj;
   typedef typename vobj::scalar_object sobj;
 
-  std::vector<Field> _v; // _Nfull vectors
+  std::vector<Field, Allocator> _v; // _Nfull vectors
 
   void report(int n,GridBase* value) {
 
@@ -629,11 +629,11 @@ class BasisFieldVector {
 
   }
 
-  BasisFieldVector(int Nm,GridBase* value) : _Nm(Nm), _v(Nm,value) {
+ BasisFieldVector(int Nm,GridBase* value, const Allocator& a = std::allocator<Field>() ) : _Nm(Nm), _v(Nm,value,a) {
     report(Nm,value);
   }
 
-  BasisFieldVector() : _Nm(0) {
+ BasisFieldVector(const Allocator& a = std::allocator<Field>() ) : _Nm(0), _v(a) {
   }
   
   ~BasisFieldVector() {
@@ -664,11 +664,11 @@ class BasisFieldVector {
       for(int ss=0;ss < grid->oSites();ss++){
 	for(int j=j0; j<j1; ++j) B[j]=0.;
 
-	if (isBoss)
-	  std::cout << GridLogMessage << "Start rotation " << ss << " / " << grid->oSites() << std::endl;
+	//if (isBoss)
+	//  std::cout << GridLogMessage << "Start rotation " << ss << " / " << grid->oSites() << std::endl;
 
-	GridStopWatch gsw;
-	gsw.Start();
+	//GridStopWatch gsw;
+	//gsw.Start();
 
 	for(int j=j0; j<j1; ++j){
 #pragma omp for
@@ -676,10 +676,10 @@ class BasisFieldVector {
 	    B[j] +=Qt[k+Nm*j] * _v[k]._odata[ss];
 	  }
 	}
-	gsw.Stop();
+	//gsw.Stop();
 
-	if (isBoss)
-	  std::cout << GridLogMessage << "rotate timing " << ss << " / " << grid->oSites() << " took " << gsw.Elapsed() << std::endl;
+	//if (isBoss)
+	//  std::cout << GridLogMessage << "rotate timing " << ss << " / " << grid->oSites() << " took " << gsw.Elapsed() << std::endl;
 	
 #pragma omp single
 	{
@@ -812,6 +812,7 @@ class BasisFieldVector {
   }
 
  }; 
+
 
 /*
   BlockProjector
@@ -1024,8 +1025,8 @@ public:
     }
   }
 
-  template<typename CoarseField>
-    void deflateCoarse(BasisFieldVector<CoarseField>& _coef,const std::vector<RealD>& eval,int N,const Field& src_orig,Field& result) {
+  template<typename CoarseField,typename Allocator>
+    void deflateCoarse(BasisFieldVector<CoarseField,Allocator>& _coef,const std::vector<RealD>& eval,int N,const Field& src_orig,Field& result) {
     CoarseField src_coarse(_coef._v[0]._grid);
     CoarseField result_coarse = src_coarse;
     result_coarse = zero;
@@ -1041,8 +1042,8 @@ public:
     coarseToFine(result_coarse,result);
   }
 
-  template<typename CoarseField>
-    void deflate(BasisFieldVector<CoarseField>& _coef,const std::vector<RealD>& eval,int N,const Field& src_orig,Field& result) {
+  template<typename CoarseField,typename Allocator>
+    void deflate(BasisFieldVector<CoarseField,Allocator>& _coef,const std::vector<RealD>& eval,int N,const Field& src_orig,Field& result) {
     // Deflation on coarse Grid is much faster, so use it by default.  Deflation on fine Grid is kept for legacy reasons for now.
     deflateCoarse(_coef,eval,N,src_orig,result);
   }
@@ -1313,7 +1314,7 @@ public:
      // check 
      {
        struct stat sb;
-       if (stat(dir, &sb) || !S_ISDIR(sb.st_mode))
+       if (stat(dir, &sb) || !S_ISDIR(sb.st_mode) || stat(buf, &sb))
 	 return false;
      }
 
@@ -1545,8 +1546,8 @@ public:
      free(buf);
    }
 
-   template<typename Field,typename CoarseField>
-     static bool read_compressed_vectors(const char* dir,BlockProjector<Field>& pr,BasisFieldVector<CoarseField>& coef, int ngroups = 1) {
+   template<typename Field,typename CoarseField,typename Allocator>
+     static bool read_compressed_vectors(const char* dir,BlockProjector<Field>& pr,BasisFieldVector<CoarseField,Allocator>& coef, int ngroups = 1) {
 
      const BasisFieldVector<Field>& basis = pr._evec;
      GridBase* _grid = basis._v[0]._grid;

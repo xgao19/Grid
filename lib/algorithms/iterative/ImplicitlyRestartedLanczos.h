@@ -1312,11 +1312,16 @@ public:
      sprintf(buf,"%s/nodes.txt",dir);
 
      // check 
-     {
+     uint32_t found = 0;
+     if (_grid->IsBoss()) {
        struct stat sb;
-       if (stat(dir, &sb) || !S_ISDIR(sb.st_mode) || stat(buf, &sb))
-	 return false;
+       if (!(stat(dir, &sb) || !S_ISDIR(sb.st_mode) || stat(buf, &sb)))
+	 found = 1;
      }
+     _grid->GlobalSum(found);
+
+     if (!found)
+       return false;
 
      if (_grid->IsBoss()) {
        FILE* f = fopen(buf,"rt");

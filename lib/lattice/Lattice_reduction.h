@@ -68,6 +68,38 @@ inline ComplexD innerProduct(const Lattice<vobj> &left,const Lattice<vobj> &righ
   right._grid->GlobalSum(nrm);
   return nrm;
 }
+
+// Double inner product
+template<class vobj>
+inline ComplexD innerProductNodeLocal(const Lattice<vobj> &left,const Lattice<vobj> &right) 
+{
+  typedef typename vobj::scalar_type scalar_type;
+  typedef typename vobj::vector_typeD vector_type;
+  scalar_type  nrm;
+  
+  GridBase *grid = left._grid;
+  
+  std::vector<vector_type,alignedAllocator<vector_type> > sumarray(grid->SumArraySize());
+  
+  parallel_for(int thr=0;thr<grid->SumArraySize();thr++){
+    int nwork, mywork, myoff;
+    GridThread::GetWork(left._grid->oSites(),thr,mywork,myoff);
+    
+    decltype(innerProductD(left._odata[0],right._odata[0])) vnrm=zero; // private to thread; sub summation
+    for(int ss=myoff;ss<mywork+myoff; ss++){
+      vnrm = vnrm + innerProductD(left._odata[ss],right._odata[ss]);
+    }
+    sumarray[thr]=TensorRemove(vnrm) ;
+  }
+  
+  vector_type vvnrm; vvnrm=zero;  // sum across threads
+  for(int i=0;i<grid->SumArraySize();i++){
+    vvnrm = vvnrm+sumarray[i];
+  } 
+  nrm = Reduce(vvnrm);// sum across simd
+  //right._grid->GlobalSum(nrm);
+  return nrm;
+}
  
 template<class Op,class T1>
 inline auto sum(const LatticeUnaryExpression<Op,T1> & expr)

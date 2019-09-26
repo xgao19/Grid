@@ -33,6 +33,8 @@ directory
 #define QCD_UTIL_SUN_H
 
 namespace Grid {
+
+  extern double hmc_global_momentum_sign;
 namespace QCD {
 
 template <int ncolour>
@@ -647,7 +649,7 @@ class SU {
     GridBase *grid = out._grid;
     LatticeReal ca(grid);
     LatticeMatrix la(grid);
-    Complex ci(0.0, scale);
+    Complex ci(0.0, hmc_global_momentum_sign*scale);
     Matrix ta;
 
     out = zero;

@@ -351,7 +351,7 @@ namespace Grid {
       int ieee32big = (format == std::string("IEEE32BIG"));
       int ieee32    = (format == std::string("IEEE32"));
       int ieee64big = (format == std::string("IEEE64BIG"));
-      int ieee64    = (format == std::string("IEEE64"));
+      int ieee64    = (format == std::string("IEEE64") || format == std::string("IEEE64LITTLE"));
 
       uint32_t csum;
       // depending on datatype, set up munger;
@@ -399,6 +399,8 @@ namespace Grid {
       }
 
       NerscStatistics<GaugeField>(Umu,clone);
+      
+      std::cout << GridLogMessage << "norm2(Umu): " << norm2(Umu) << std::endl;
 
       std::cout<<GridLogMessage <<"NERSC Configuration "<<file<<" checksum "<<std::hex<<            csum<< std::dec
 	       <<" header   "<<std::hex<<header.checksum<<std::dec <<std::endl;
@@ -406,6 +408,9 @@ namespace Grid {
 	       <<" header    "<<header.plaquette<<std::endl;
       std::cout<<GridLogMessage <<"NERSC Configuration "<<file<<" link_trace "<<clone.link_trace
 	       <<" header    "<<header.link_trace<<std::endl;
+
+      std::cout.flush();
+
       assert(fabs(clone.plaquette -header.plaquette ) < 1.0e-5 );
       assert(fabs(clone.link_trace-header.link_trace) < 1.0e-6 );
       assert(csum == header.checksum );

@@ -41,7 +41,7 @@ int main (int argc, char ** argv)
 
   std::vector<int> simd_layout = GridDefaultSimd(4,vComplex::Nsimd());
   std::vector<int> mpi_layout  = GridDefaultMpi();
-  std::vector<int> latt_size  ({16,16,16,16});
+  std::vector<int> latt_size  ({16,16,16,32});
   std::vector<int> clatt_size  ({4,4,4,8});
   int orthodir=3;
   int orthosz =latt_size[orthodir];
@@ -75,20 +75,20 @@ int main (int argc, char ** argv)
 
 
   LatticeGaugeField Umu(&Fine);
-  LatticeGaugeField Umu_diff(&Fine);
-  LatticeGaugeField Umu_saved(&Fine);
+  //LatticeGaugeField Umu_diff(&Fine);
+  //LatticeGaugeField Umu_saved(&Fine);
 
-  std::vector<LatticeColourMatrix> U(4,&Fine);
+  //std::vector<LatticeColourMatrix> U(4,&Fine);
   
   SU3::ColdConfiguration(pRNGa,Umu);
 
   NerscField header;
-  std::string file("./ckpoint_lat.4000");
+  std::string file("./ckpoint_lat.16s32t.cold");
 
   int precision32 = 0;
   int tworow      = 0;
   NerscIO::writeConfiguration(Umu,file,tworow,precision32);
-  NerscIO::readConfiguration(Umu,header,file);
+  /*NerscIO::readConfiguration(Umu,header,file);
 
   for(int mu=0;mu<Nd;mu++){
     U[mu] = PeekIndex<LorentzIndex>(Umu,mu);
@@ -155,6 +155,6 @@ int main (int argc, char ** argv)
 
   NerscIO::writeConfiguration(Umu,clone3x3,0,precision32);
   NerscIO::writeConfiguration(Umu,clone2x3,1,precision32);
-  
+  */
   Grid_finalize();
 }

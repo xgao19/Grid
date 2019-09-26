@@ -30,12 +30,29 @@ directory
 /*  END LEGAL */
 #include <Grid/Grid.h>
 
+namespace Grid {
+  double hmc_global_momentum_sign;
+};
+
 int main(int argc, char **argv) {
   using namespace Grid;
   using namespace Grid::QCD;
 
   Grid_init(&argc, &argv);
   GridLogLayout();
+
+  Grid::hmc_global_momentum_sign = 0.0;
+  RealD beta = 0.0 ;
+
+  for (int i=1;i<argc-1;i++) {
+    if (!strcmp(argv[i],"--hmcs")) {
+      Grid::hmc_global_momentum_sign = atof(argv[i+1]);
+      std::cout << GridLogMessage << "Momentum sign: " << Grid::hmc_global_momentum_sign << std::endl;
+    } else if (!strcmp(argv[i],"--beta")) {
+      beta = atof(argv[i+1]);
+      std::cout << GridLogMessage << "beta: " << beta << std::endl;
+    }
+  }
 
    // Typedefs to simplify notation
   typedef GenericHMCRunner<MinimumNorm2> HMCWrapper;  // Uses the default minimum norm
@@ -51,7 +68,7 @@ int main(int argc, char **argv) {
   CheckpointerParameters CPparams;  
   CPparams.config_prefix = "ckpoint_lat";
   CPparams.rng_prefix = "ckpoint_rng";
-  CPparams.saveInterval = 1;
+  CPparams.saveInterval = 100000;
   CPparams.format = "IEEE64BIG";
   
   TheHMC.Resources.LoadNerscCheckpointer(CPparams);
@@ -64,9 +81,9 @@ int main(int argc, char **argv) {
   // Construct observables
   // here there is too much indirection 
   typedef PlaquetteMod<HMCWrapper::ImplPolicy> PlaqObs;
-  typedef TopologicalChargeMod<HMCWrapper::ImplPolicy> QObs;
+  //typedef TopologicalChargeMod<HMCWrapper::ImplPolicy> QObs;
   TheHMC.Resources.AddObservable<PlaqObs>();
-  TheHMC.Resources.AddObservable<QObs>();
+  //TheHMC.Resources.AddObservable<QObs>();
   //////////////////////////////////////////////
 
   /////////////////////////////////////////////////////////////
@@ -74,7 +91,6 @@ int main(int argc, char **argv) {
   // need wrappers of the fermionic classes 
   // that have a complex construction
   // standard
-  RealD beta = 5.6 ;
   WilsonGaugeActionR Waction(beta);
   
   ActionLevel<HMCWrapper::Field> Level1(1);

@@ -249,12 +249,18 @@ public:
   }
   
   Lattice(const Lattice& r){ // copy constructor
+
     _grid = r._grid;
+
+    std::cout << GridLogMessage << "CC0" << r._odata.size() << "," << _grid->oSites() << std::endl; std::cout.flush(); _grid->Barrier();
+
     checkerboard = r.checkerboard;
     _odata.resize(_grid->oSites());// essential
     parallel_for(int ss=0;ss<_grid->oSites();ss++){
       _odata[ss]=r._odata[ss];
     }  	
+
+    std::cout << GridLogMessage << "CC1" << r._odata.size() << "," << _grid->oSites() << std::endl; std::cout.flush(); _grid->Barrier();
   }
   
   

@@ -1552,7 +1552,8 @@ public:
    }
 
    template<typename Field,typename CoarseField,typename Allocator>
-     static bool read_compressed_vectors(const char* dir,BlockProjector<Field>& pr,BasisFieldVector<CoarseField,Allocator>& coef, int ngroups = 1) {
+     static bool read_compressed_vectors(const char* dir,BlockProjector<Field>& pr,BasisFieldVector<CoarseField,Allocator>& coef, int ngroups = 1,
+					 bool truncate_basis = false) {
 
      const BasisFieldVector<Field>& basis = pr._evec;
      GridBase* _grid = basis._v[0]._grid;
@@ -1626,7 +1627,14 @@ public:
 
      // allocate memory
      assert(std::equal(pr._bgrid._bs.begin(),pr._bgrid._bs.end(),b.begin())); // needs to be the same for now
-     assert(pr._evec.size() == nkeep); // needs to be the same since this is compile-time fixed
+
+     int basis_truncated_nkeep = (int)pr._evec.size();
+     if (truncate_basis) {
+       assert(basis_truncated_nkeep <= nkeep);
+       assert(basis_truncated_nkeep >= nkeep_single); // this can be lifted in future versions of this code
+     } else {
+       assert(basis_truncated_nkeep == nkeep);
+     }
      coef.resize(neig);
 
 
@@ -1724,8 +1732,8 @@ public:
 	 gsw2.Start();
 	 if (action) {
 	   int nsingleCap = nkeep_single;
-	   if (pr._evec.size() < nsingleCap)
-	     nsingleCap = pr._evec.size();
+	   if (basis_truncated_nkeep < nsingleCap)
+	     nsingleCap = basis_truncated_nkeep;
 	   
 	   int _cf_block_size = slot_lsites * 12 / 2 / blocks;
 	   
@@ -1763,8 +1771,8 @@ public:
 	     std::vector<float> buf(_cf_block_size * 2);
 #pragma omp for
 	     for (int nb=0;nb<blocks;nb++) {
-	       for (int i=nsingleCap;i<(int)pr._evec.size();i++) {
-		 char* lptr = ptr + FP_16_SIZE( buf.size(), 24 )*((i-nsingleCap) + (pr._evec.size() - nsingleCap)*nb);
+	       for (int i=nsingleCap;i<basis_truncated_nkeep;i++) {
+		 char* lptr = ptr + FP_16_SIZE( buf.size(), 24 )*((i-nsingleCap) + (nkeep - nsingleCap)*nb);
 		 read_floats_fp16(lptr, &buf[0], buf.size(), 24);
 		 int mnb = pr._bgrid.globalToLocalCanonicalBlock(slot,_nn,nb);
 		 if (mnb != -1)
@@ -1775,7 +1783,7 @@ public:
 #pragma omp barrier
 #pragma omp single
 	     {
-	       ptr = ptr + FP_16_SIZE( buf.size()*(pr._evec.size() - nsingleCap)*blocks, 24 );
+	       ptr = ptr + FP_16_SIZE( buf.size()*(nkeep - nsingleCap)*blocks, 24 );
 	     }
 	   }
 	   
@@ -1797,13 +1805,13 @@ public:
 		 int l;
 		 read_floats(lptr, &buf1[0], buf1.size() );
 		 if (mnb != -1) {
-		   for (l=0;l<nkeep_single;l++) {
+		   for (l=0;l<nkeep_single;l++) { // TODO: further generalize 
 		     ((CoeffCoarse_t*)&coef._v[j]._odata[oi]._internal._internal[l])[ii] = CoeffCoarse_t(buf1[2*l+0],buf1[2*l+1]);
 		   }
 		 }
 		 read_floats_fp16(lptr, &buf2[0], buf2.size(), _FP16_COEF_EXP_SHARE_FLOATS);
 		 if (mnb != -1) {
-		   for (l=nkeep_single;l<nkeep;l++) {
+		   for (l=nkeep_single;l<basis_truncated_nkeep;l++) {
 		     ((CoeffCoarse_t*)&coef._v[j]._odata[oi]._internal._internal[l])[ii] = CoeffCoarse_t(buf2[2*(l-nkeep_single)+0],buf2[2*(l-nkeep_single)+1]);
 		   }
 		 }

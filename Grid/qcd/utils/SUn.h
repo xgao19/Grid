@@ -881,6 +881,67 @@ static void ProjectSU3(Lattice<iVector<iScalar<iMatrix<vComplexD, 3> >,Nd> > &U)
   }
 }
 
+static void Projectnew(const Lattice<iScalar<iScalar<iMatrix<vComplexD, 3> > > >  &In, 
+                        Lattice<iScalar<iScalar<iMatrix<vComplexD, 3> > > >  &Out, 
+                        RealD accuracy = 1e-8, int maxiter =150)
+{
+
+  RealD conv = 1.0;
+  int iter = 0;
+
+  GridBase *grid = In.Grid();
+
+  auto interm = sum(trace(Out*In));
+  auto interm2 = TensorRemove(interm);
+
+  RealD norm = 1.0/(Nc*grid->gSites());
+
+  RealD old_tr = interm2.real()*norm;
+
+  RealD new_tr;
+
+  Lattice<iScalar<iScalar<iMatrix<vComplexD, 3> > > >  U(grid);
+  Lattice<iScalar<iScalar<iMatrix<vComplexD, 2> > > >  A(grid);
+  Lattice<iScalar<iScalar<iMatrix<vComplexD, 2> > > >  B(grid);
+  Lattice<iScalar<iScalar<iMatrix<vComplexD, 2> > > >  lident(grid);
+  lident = Complex(1.0);
+  LatticeComplex det(grid);
+  LatticeRealD rdet(grid);
+
+  while(conv > accuracy && iter < maxiter)
+  {
+    iter++;
+    for (int su2_index = 0; su2_index <Nc*(Nc-1)/2; su2_index++)
+    {
+      U = Out*In;
+      SU<3>::su2Extract(det, A, U, su2_index);
+
+      B = A/sqrt(det);
+      rdet = abs(toReal(det));
+
+      A = where(rdet > 1e-10, adj(B), lident);
+
+      SU<3>::su2Insert(A,U,su2_index);
+      
+      Out = U * Out;
+    }
+    
+    ProjectSU3(Out);
+
+    interm = sum(trace(Out*In));
+    interm2 = TensorRemove(interm);
+
+    new_tr = interm2.real()*norm;
+
+    conv = abs((new_tr - old_tr)/ old_tr);
+
+    old_tr = new_tr;
+  }
+
+  std::cout << GridLogMessage << "SU3 Projection converged after " << iter << " steps, residue = " << conv << std::endl; 
+
+}
+
 typedef SU<2> SU2;
 typedef SU<3> SU3;
 typedef SU<4> SU4;

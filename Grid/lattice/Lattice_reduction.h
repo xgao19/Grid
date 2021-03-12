@@ -96,8 +96,34 @@ inline typename vobj::scalar_objectD sumD_cpu(const vobj *arg, Integer osites)
   ssobj ret = ssum;
   return ret;
 }
+/*
+Threaded max, don't use for now
+template<class Double>
+inline Double max(const Double *arg, Integer osites)
+{
+  //  const int Nsimd = vobj::Nsimd();
+  const int nthread = GridThread::GetThreads();
 
-
+  std::vector<Double> maxarray(nthread);
+  
+  thread_for(thr,nthread, {
+    int nwork, mywork, myoff;
+    nwork = osites;
+    GridThread::GetWork(nwork,thr,mywork,myoff);
+    Double max=arg[0];
+    for(int ss=myoff;ss<mywork+myoff; ss++){
+      if( arg[ss] > max ) max = arg[ss];
+    }
+    maxarray[thr]=max;
+  });
+  
+  Double tmax=maxarray[0];
+  for(int i=0;i<nthread;i++){
+    if (maxarray[i]>tmax) tmax = maxarray[i];
+  } 
+  return tmax;
+}
+*/
 template<class vobj>
 inline typename vobj::scalar_object sum(const vobj *arg, Integer osites)
 {
@@ -139,6 +165,32 @@ inline typename vobj::scalar_object sum(const Lattice<vobj> &arg)
 template<class vobj> inline RealD norm2(const Lattice<vobj> &arg){
   ComplexD nrm = innerProduct(arg,arg);
   return real(nrm); 
+}
+
+//The global maximum of the site norm2
+template<class vobj> inline RealD maxLocalNorm2(const Lattice<vobj> &arg)
+{
+  typedef typename vobj::tensor_reduced vscalar;  //iScalar<iScalar<.... <vPODtype> > >
+  typedef typename vscalar::scalar_object  scalar;   //iScalar<iScalar<.... <PODtype> > >
+
+  Lattice<vscalar> inner = localNorm2(arg);
+
+  auto grid = arg.Grid();
+
+  RealD max;
+  for(int l=0;l<grid->lSites();l++){
+    Coordinate coor;
+    scalar val;
+    RealD r;
+    grid->LocalIndexToLocalCoor(l,coor);
+    peekLocalSite(val,inner,coor);
+    r=real(TensorRemove(val));
+    if( (l==0) || (r>max)){
+      max=r;
+    }
+  }
+  grid->GlobalMax(max);
+  return max;
 }
 
 // Double inner product
@@ -309,6 +361,7 @@ template<class vobj> inline void sliceSum(const Lattice<vobj> &Data,std::vector<
   // But easily avoided by using double precision fields
   ///////////////////////////////////////////////////////
   typedef typename vobj::scalar_object sobj;
+  typedef typename vobj::scalar_object::scalar_type scalar_type;
   GridBase  *grid = Data.Grid();
   assert(grid!=NULL);
 
@@ -367,20 +420,19 @@ template<class vobj> inline void sliceSum(const Lattice<vobj> &Data,std::vector<
   }
   
   // sum over nodes.
-  sobj gsum;
   for(int t=0;t<fd;t++){
     int pt = t/ld; // processor plane
     int lt = t%ld;
     if ( pt == grid->_processor_coor[orthogdim] ) {
-      gsum=lsSum[lt];
+      result[t]=lsSum[lt];
     } else {
-      gsum=Zero();
+      result[t]=Zero();
     }
 
-    grid->GlobalSum(gsum);
-
-    result[t]=gsum;
   }
+  scalar_type * ptr = (scalar_type *) &result[0];
+  int words = fd*sizeof(sobj)/sizeof(scalar_type);
+  grid->GlobalSumVector(ptr, words);
 }
 
 template<class vobj>

@@ -47,7 +47,7 @@ CayleyFermion5D<Impl>::CayleyFermion5D(GaugeField &_Umu,
 			FiveDimRedBlackGrid,
 			FourDimGrid,
 			FourDimRedBlackGrid,_M5,p),
-  mass(_mass)
+  mass_plus(_mass), mass_minus(_mass)
 { 
 }
 
@@ -209,8 +209,8 @@ void CayleyFermion5D<Impl>::M5D   (const FermionField &psi, FermionField &chi)
 {
   int Ls=this->Ls;
   Vector<Coeff_t> diag (Ls,1.0);
-  Vector<Coeff_t> upper(Ls,-1.0); upper[Ls-1]=mass;
-  Vector<Coeff_t> lower(Ls,-1.0); lower[0]   =mass;
+  Vector<Coeff_t> upper(Ls,-1.0); upper[Ls-1]=mass_minus;
+  Vector<Coeff_t> lower(Ls,-1.0); lower[0]   =mass_plus;
   M5D(psi,chi,chi,lower,diag,upper);
 }
 template<class Impl>
@@ -220,8 +220,8 @@ void CayleyFermion5D<Impl>::Meooe5D    (const FermionField &psi, FermionField &D
   Vector<Coeff_t> diag = bs;
   Vector<Coeff_t> upper= cs;
   Vector<Coeff_t> lower= cs; 
-  upper[Ls-1]=-mass*upper[Ls-1];
-  lower[0]   =-mass*lower[0];
+  upper[Ls-1]=-mass_minus*upper[Ls-1];
+  lower[0]   =-mass_plus*lower[0];
   M5D(psi,psi,Din,lower,diag,upper);
 }
 // FIXME Redunant with the above routine; check this and eliminate
@@ -235,8 +235,8 @@ template<class Impl> void CayleyFermion5D<Impl>::Meo5D     (const FermionField &
     upper[i]=-ceo[i];
     lower[i]=-ceo[i];
   }
-  upper[Ls-1]=-mass*upper[Ls-1];
-  lower[0]   =-mass*lower[0];
+  upper[Ls-1]=-mass_minus*upper[Ls-1];
+  lower[0]   =-mass_plus*lower[0];
   M5D(psi,psi,chi,lower,diag,upper);
 }
 template<class Impl>
@@ -250,8 +250,8 @@ void CayleyFermion5D<Impl>::Mooee       (const FermionField &psi, FermionField &
     upper[i]=-cee[i];
     lower[i]=-cee[i];
   }
-  upper[Ls-1]=-mass*upper[Ls-1];
-  lower[0]   =-mass*lower[0];
+  upper[Ls-1]=-mass_minus*upper[Ls-1];
+  lower[0]   =-mass_plus*lower[0];
   M5D(psi,psi,chi,lower,diag,upper);
 }
 template<class Impl>
@@ -266,9 +266,9 @@ void CayleyFermion5D<Impl>::MooeeDag    (const FermionField &psi, FermionField &
     // Assemble the 5d matrix
     if ( s==0 ) {
       upper[s] = -cee[s+1] ;
-      lower[s] = mass*cee[Ls-1];
+      lower[s] = mass_minus*cee[Ls-1];
     } else if ( s==(Ls-1)) { 
-      upper[s] = mass*cee[0];
+      upper[s] = mass_plus*cee[0];
       lower[s] = -cee[s-1];
     } else {
       upper[s]=-cee[s+1];
@@ -291,8 +291,8 @@ void CayleyFermion5D<Impl>::M5Ddag (const FermionField &psi, FermionField &chi)
   Vector<Coeff_t> diag(Ls,1.0);
   Vector<Coeff_t> upper(Ls,-1.0);
   Vector<Coeff_t> lower(Ls,-1.0);
-  upper[Ls-1]=-mass*upper[Ls-1];
-  lower[0]   =-mass*lower[0];
+  upper[Ls-1]=-mass_plus*upper[Ls-1];
+  lower[0]   =-mass_minus*lower[0];
   M5Ddag(psi,chi,chi,lower,diag,upper);
 }
 
@@ -307,9 +307,9 @@ void CayleyFermion5D<Impl>::MeooeDag5D    (const FermionField &psi, FermionField
   for (int s=0;s<Ls;s++){
     if ( s== 0 ) {
       upper[s] = cs[s+1];
-      lower[s] =-mass*cs[Ls-1];
+      lower[s] =-mass_minus*cs[Ls-1];
     } else if ( s==(Ls-1) ) { 
-      upper[s] =-mass*cs[0];
+      upper[s] =-mass_plus*cs[0];
       lower[s] = cs[s-1];
     } else { 
       upper[s] = cs[s+1];
@@ -552,7 +552,7 @@ void CayleyFermion5D<Impl>::SetCoefficientsInternal(RealD zolo_hi,Vector<Coeff_t
       
       lee[i] =-cee[i+1]/bee[i]; // sub-diag entry on the ith column
       
-      leem[i]=mass*cee[Ls-1]/bee[0];
+      leem[i]=mass_minus*cee[Ls-1]/bee[0];
       for(int j=0;j<i;j++) {
 	assert(bee[j+1]!=Coeff_t(0.0));
 	leem[i]*= aee[j]/bee[j+1];
@@ -560,7 +560,7 @@ void CayleyFermion5D<Impl>::SetCoefficientsInternal(RealD zolo_hi,Vector<Coeff_t
       
       uee[i] =-aee[i]/bee[i];   // up-diag entry on the ith row
       
-      ueem[i]=mass;
+      ueem[i]=mass_plus;
       for(int j=1;j<=i;j++) ueem[i]*= cee[j]/bee[j];
       ueem[i]*= aee[0]/bee[0];
       
@@ -573,7 +573,7 @@ void CayleyFermion5D<Impl>::SetCoefficientsInternal(RealD zolo_hi,Vector<Coeff_t
   }
 	
   { 
-    Coeff_t delta_d=mass*cee[Ls-1];
+    Coeff_t delta_d=mass_minus*cee[Ls-1];
     for(int j=0;j<Ls-1;j++) {
       assert(bee[j] != Coeff_t(0.0));
       delta_d *= cee[j]/bee[j];
@@ -642,6 +642,10 @@ void CayleyFermion5D<Impl>::ContractConservedCurrent( PropagatorField &q_in_1,
 						      Current curr_type,
 						      unsigned int mu)
 {
+
+  assert(mass_plus == mass_minus);
+  RealD mass = mass_plus;
+  
 #if (!defined(GRID_HIP))
   Gamma::Algebra Gmu [] = {
     Gamma::Algebra::GammaX,
@@ -777,6 +781,8 @@ void CayleyFermion5D<Impl>::SeqConservedCurrent(PropagatorField &q_in,
   assert(mu>=0);
   assert(mu<Nd);
 
+  assert(mass_plus == mass_minus);
+  RealD mass = mass_plus;
 
 #if 0
   int tshift = (mu == Nd-1) ? 1 : 0;
@@ -828,6 +834,7 @@ void CayleyFermion5D<Impl>::SeqConservedCurrent(PropagatorField &q_in,
 
 #if (!defined(GRID_HIP))
   int tshift = (mu == Nd-1) ? 1 : 0;
+  unsigned int LLt    = GridDefaultLatt()[Tp];
   ////////////////////////////////////////////////
   // GENERAL CAYLEY CASE
   ////////////////////////////////////////////////
@@ -880,7 +887,7 @@ void CayleyFermion5D<Impl>::SeqConservedCurrent(PropagatorField &q_in,
   }
 
   std::vector<RealD> G_s(Ls,1.0);
-  RealD sign = 1; // sign flip for vector/tadpole
+  RealD sign = 1.0; // sign flip for vector/tadpole
   if ( curr_type == Current::Axial ) {
     for(int s=0;s<Ls/2;s++){
       G_s[s] = -1.0;
@@ -890,7 +897,7 @@ void CayleyFermion5D<Impl>::SeqConservedCurrent(PropagatorField &q_in,
     auto b=this->_b;
     auto c=this->_c;
     if ( b == 1 && c == 0 ) {
-      sign = -1;    
+      sign = -1.0;    
     }
     else {
       std::cerr << "Error: Tadpole implementation currently unavailable for non-Shamir actions." << std::endl;
@@ -934,7 +941,13 @@ void CayleyFermion5D<Impl>::SeqConservedCurrent(PropagatorField &q_in,
     tmp    = Cshift(tmp,mu,-1);
     Impl::multLinkField(Utmp,this->Umu,tmp,mu+Nd); // Adjoint link
     tmp = -G_s[s]*( Utmp + gmu*Utmp );
-    tmp    = where((lcoor>=tmin+tshift),tmp,zz); // Mask the time 
+    // Mask the time
+    if (tmax == LLt - 1 && tshift == 1){ // quick fix to include timeslice 0 if tmax + tshift is over the last timeslice
+      unsigned int t0 = 0;
+      tmp    = where(((lcoor==t0) || (lcoor>=tmin+tshift)),tmp,zz);
+    } else {
+      tmp    = where((lcoor>=tmin+tshift),tmp,zz);
+    }
     L_Q   += where((lcoor<=tmax+tshift),tmp,zz); // Position of current complicated
 
     InsertSlice(L_Q, q_out, s , 0);

@@ -53,7 +53,7 @@ static int readInt(int* argc, char*** argv, std::string&& option, int defaultVal
 
 static float readFloat(int* argc, char*** argv, std::string&& option, float defaultValue) {
   std::string arg;
-  float       ret = defaultValue;
+  double      ret = defaultValue;
   if(checkPresent(argc, argv, option)) {
     arg = getContent(argc, argv, option);
     GridCmdOptionFloat(arg, ret);
@@ -117,8 +117,8 @@ void runBenchmark(int* argc, char*** argv) {
 
   // type definitions
   typedef WilsonImpl<vCoeff_t, FundamentalRepresentation, CoeffReal> WImpl;
-  typedef WilsonCloverFermion<WImpl> WilsonCloverOperator;
-  typedef CompactWilsonCloverFermion<WImpl> CompactWilsonCloverOperator;
+  typedef WilsonCloverFermion<WImpl, CloverHelpers<WImpl>> WilsonCloverOperator;
+  typedef CompactWilsonCloverFermion<WImpl, CompactCloverHelpers<WImpl>> CompactWilsonCloverOperator;
   typedef typename WilsonCloverOperator::FermionField Fermion;
   typedef typename WilsonCloverOperator::GaugeField Gauge;
 
